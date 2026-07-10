@@ -26,30 +26,10 @@
                               └────────────────────────┘
 ```
 
-- **Cloudflare 侧**：开启 Email Routing，把 `*@yourdomain` 配为 catch-all **转发到目标邮箱**（不是 Send to Worker）。
+- **Cloudflare 侧**：开启 Email Routing，把 `*@yourdomain` 配为 catch-all **转发到目标邮箱**（不是 Send t Worker）。
 - **中转邮箱**：任意支持 Graph/IMAP 的邮箱（个人 Outlook 推荐 Graph 模式）。
 - **Go 后端**：定时读取中转邮箱新邮件，按收件地址路由到对应临时邮箱并入库。
 
-## 项目结构
-
-```
-.
-├── main.go                 # 入口：路由 + 定时清理 + 收信 poller
-├── config/config.go        # 环境变量配置 + refresh_token 轮换写回
-├── models/models.go        # GORM 数据模型 (Mailbox / Message)
-├── storage/db.go           # SQLite 初始化与自动迁移
-├── middleware/auth.go      # API Key 与 Webhook Secret 鉴权
-├── handlers/
-│   ├── email.go            # 邮箱创建/查询/删除
-│   ├── message.go          # 邮件查询/删除（detail 含 raw）
-│   ├── webhook.go          # 可选 webhook 入口（默认禁用）
-│   ├── store.go            # IMAP/webhook 通用：解析 RFC822 并存储
-│   └── graph_store.go      # Graph 模式：把 Graph JSON 邮件存库
-├── graph/poller.go         # Graph API 轮询器（推荐）
-├── imap/poller.go          # IMAP 轮询器（备选）
-├── tools/get_graph_token.py # 获取 Graph refresh_token 的脱敏脚本
-└── .env.example
-```
 
 ## 前置条件
 
@@ -57,7 +37,6 @@
 2. 一个中转邮箱：
    - **Outlook 个人账号**：推荐 Graph 模式（IMAP OAuth2 常报 `User is authenticated but not connected`）。
    - **Gmail**：用 IMAP + 应用专用密码。
-3. Go 1.25+。SQLite 用纯 Go 驱动（modernc.org/sqlite），**无需 CGO/gcc**，可直接交叉编译静态二进制（见 `build.sh`）。
 
 ## 一、配置 Cloudflare Email Routing（转发，非 Worker）
 
@@ -199,14 +178,8 @@ IMAP_TOKEN_SCOPE=https://outlook.office.com/IMAP.AccessAsUser.All offline_access
 - MySQL：`gorm.io/driver/mysql`
 
 模型与 handler 无需改动。
-
-## 安全提示
-
-- `API_KEY` 用 `openssl rand -hex 32` 生成强随机值。
-- 中转邮箱建议专用，不要让其他邮件客户端同时读取（IMAP 模式只拉未读邮件）。
-- **绝不要把 `.env`、`*_tokens.txt` 或任何 refresh_token / client_secret 提交到 git**——`.gitignore` 已默认排除。
-- Graph 模式的 refresh_token 会轮换，项目会自动写回 `.env`；不要多实例并发。
-- API 走 HTTPS 反代。
+## 社区
+友情链接：[LINUX DO](https://linux.do)
 
 ## 后台运行（systemd 示例）
 
