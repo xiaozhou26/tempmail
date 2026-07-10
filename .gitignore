@@ -1,6 +1,7 @@
 # Build output
 /tempmail
 *.exe
+/dist/
 
 # Runtime data
 /data/

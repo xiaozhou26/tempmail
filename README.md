@@ -57,7 +57,7 @@
 2. 一个中转邮箱：
    - **Outlook 个人账号**：推荐 Graph 模式（IMAP OAuth2 常报 `User is authenticated but not connected`）。
    - **Gmail**：用 IMAP + 应用专用密码。
-3. Go 1.25+ 与 gcc/CGO（SQLite 驱动需要）。Windows 需安装 MinGW/TDM-GCC，`CGO_ENABLED=1`。
+3. Go 1.25+。SQLite 用纯 Go 驱动（modernc.org/sqlite），**无需 CGO/gcc**，可直接交叉编译静态二进制（见 `build.sh`）。
 
 ## 一、配置 Cloudflare Email Routing（转发，非 Worker）
 
@@ -83,6 +83,16 @@ graph poller started: your-account@outlook.com every 60s
 ```
 
 建议用 nginx/Caddy 反代到 HTTPS 对外提供 API。
+
+### 交叉编译 Linux 二进制
+
+SQLite 用纯 Go 驱动，无需 CGO，直接交叉编译：
+
+```bash
+bash build.sh          # 输出 dist/tempmail-linux-amd64（静态二进制）
+```
+
+把 `dist/tempmail-linux-amd64` 和 `.env` 上传到服务器即可运行。
 
 ## 三、API 使用
 
