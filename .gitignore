@@ -1,0 +1,24 @@
+# Build output
+/tempmail
+*.exe
+
+# Runtime data
+/data/
+
+# Local config (contains secrets)
+.env
+
+# OAuth tokens and credential files (NEVER commit)
+microsoft_tokens.txt
+my_graph_tokens.txt
+my_microsoft_tokens.txt
+*_tokens.txt
+*_tokens.json
+*.token
+
+# Scripts with real credentials are local-only; keep the sanitized template
+scripts/
+
+# Editor / OS
+.DS_Store
+*.swp
