@@ -1,0 +1,29 @@
+# Build context for tempmail Docker image.
+# Keep secrets, local data, and tooling out of the image.
+
+.git
+.github
+.claude
+.proxy-mcp
+.env
+.env.*
+!.env.example
+
+data/
+dist/
+scripts/
+tools/
+
+*.exe
+tempmail
+*_tokens.txt
+*_tokens.json
+*.token
+microsoft_tokens.txt
+my_graph_tokens.txt
+my_microsoft_tokens.txt
+
+.DS_Store
+*.swp
+*.md
+!README.md

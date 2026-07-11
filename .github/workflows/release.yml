@@ -1,0 +1,251 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to build (e.g. v1.0.0). Leave empty to use the current ref name."
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Cross-compile static binaries (pure Go SQLite, CGO_ENABLED=0)
+  # ---------------------------------------------------------------------------
+  binaries:
+    name: Binary (${{ matrix.goos }}/${{ matrix.goarch }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            asset: tempmail-linux-amd64
+          - goos: linux
+            goarch: arm64
+            asset: tempmail-linux-arm64
+          - goos: darwin
+            goarch: amd64
+            asset: tempmail-darwin-amd64
+          - goos: darwin
+            goarch: arm64
+            asset: tempmail-darwin-arm64
+          - goos: windows
+            goarch: amd64
+            asset: tempmail-windows-amd64.exe
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Resolve version
+        id: ver
+        shell: bash
+        run: |
+          if [[ -n "${{ inputs.tag }}" ]]; then
+            VERSION="${{ inputs.tag }}"
+          elif [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            VERSION="${GITHUB_REF_NAME}"
+          else
+            VERSION="dev-${GITHUB_SHA::7}"
+          fi
+          [[ "$VERSION" != v* && "$VERSION" != dev-* ]] && VERSION="v${VERSION}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Build
+        env:
+          CGO_ENABLED: "0"
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          go build -trimpath \
+            -ldflags="-s -w -X main.version=${{ steps.ver.outputs.version }}" \
+            -o "dist/${{ matrix.asset }}" .
+          ls -lh "dist/${{ matrix.asset }}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: dist/${{ matrix.asset }}
+          if-no-files-found: error
+          retention-days: 14
+
+  # ---------------------------------------------------------------------------
+  # Multi-arch Docker image -> GHCR
+  # ---------------------------------------------------------------------------
+  docker:
+    name: Docker image
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: ver
+        shell: bash
+        run: |
+          if [[ -n "${{ inputs.tag }}" ]]; then
+            VERSION="${{ inputs.tag }}"
+          elif [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            VERSION="${GITHUB_REF_NAME}"
+          else
+            VERSION="dev-${GITHUB_SHA::7}"
+          fi
+          [[ "$VERSION" != v* && "$VERSION" != dev-* ]] && VERSION="v${VERSION}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "is_release=${{ github.ref_type == 'tag' || inputs.tag != '' }}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=semver,pattern={{version}},value=${{ steps.ver.outputs.version }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ steps.ver.outputs.version }}
+            type=semver,pattern={{major}},value=${{ steps.ver.outputs.version }}
+            type=raw,value=latest,enable=${{ steps.ver.outputs.is_release == 'true' }}
+            type=sha,prefix=sha-,format=short
+          labels: |
+            org.opencontainers.image.title=tempmail
+            org.opencontainers.image.description=Self-hosted temporary domain mailbox backend
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.version=${{ steps.ver.outputs.version }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ steps.ver.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: false
+
+  # ---------------------------------------------------------------------------
+  # GitHub Release with binary assets
+  # ---------------------------------------------------------------------------
+  release:
+    name: GitHub Release
+    needs: [binaries, docker]
+    runs-on: ubuntu-latest
+    if: github.ref_type == 'tag' || inputs.tag != ''
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve tag
+        id: ver
+        shell: bash
+        run: |
+          if [[ -n "${{ inputs.tag }}" ]]; then
+            TAG="${{ inputs.tag }}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+          # ensure leading v
+          [[ "$TAG" != v* ]] && TAG="v${TAG}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "version_plain=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Download all binary artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: List assets
+        run: ls -lah dist/
+
+      - name: Generate checksums
+        working-directory: dist
+        run: |
+          sha256sum tempmail-* > checksums.txt
+          cat checksums.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ver.outputs.tag }}
+          name: tempmail ${{ steps.ver.outputs.tag }}
+          generate_release_notes: true
+          body: |
+            ## tempmail ${{ steps.ver.outputs.tag }}
+
+            Self-hosted temporary domain mailbox backend (Go + Gin + SQLite).
+
+            ### Docker
+
+            ```bash
+            docker pull ghcr.io/${{ github.repository }}:${{ steps.ver.outputs.version_plain }}
+            # or
+            docker pull ghcr.io/${{ github.repository }}:latest
+            ```
+
+            ```bash
+            docker run -d --name tempmail \
+              -p 8080:8080 \
+              -v tempmail-data:/data \
+              --env-file .env \
+              ghcr.io/${{ github.repository }}:${{ steps.ver.outputs.version_plain }}
+            ```
+
+            > Image is multi-arch (`linux/amd64`, `linux/arm64`). Package may be private on first publish — make it public under **Packages** if needed.
+
+            ### Binaries
+
+            Static binaries (`CGO_ENABLED=0`, pure-Go SQLite). Download the asset for your platform, pair with a `.env` from `.env.example`, and run:
+
+            ```bash
+            chmod +x tempmail-linux-amd64
+            ./tempmail-linux-amd64
+            ```
+
+            SHA-256 checksums are in `checksums.txt`.
+          files: |
+            dist/tempmail-linux-amd64
+            dist/tempmail-linux-arm64
+            dist/tempmail-darwin-amd64
+            dist/tempmail-darwin-arm64
+            dist/tempmail-windows-amd64.exe
+            dist/checksums.txt
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

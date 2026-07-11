@@ -11,19 +11,22 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"tempmail/config"
+	graphpoll "tempmail/graph"
 	"tempmail/handlers"
 	imappoll "tempmail/imap"
-	graphpoll "tempmail/graph"
 	"tempmail/middleware"
 	"tempmail/storage"
 )
+
+// version is injected at link time: -ldflags "-X main.version=v1.0.0"
+var version = "dev"
 
 func main() {
 	cfg, err := config.Load()
 	if err != nil {
 		log.Fatalf("config: %v", err)
 	}
-	log.Printf("starting tempmail for domain %q on %s", cfg.Domain, cfg.ListenAddr)
+	log.Printf("starting tempmail %s for domain %q on %s", version, cfg.Domain, cfg.ListenAddr)
 
 	db, err := storage.Open(cfg.DBPath)
 	if err != nil {
@@ -35,7 +38,9 @@ func main() {
 	webhookH := &handlers.WebhookHandler{DB: db, Domain: cfg.Domain}
 
 	r := gin.Default()
-	r.GET("/healthz", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"ok": true}) })
+	r.GET("/healthz", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"ok": true, "version": version})
+	})
 
 	api := r.Group("/api")
 	// Management endpoints require the API key.
@@ -58,7 +63,7 @@ func main() {
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
-	// Background tasks: expired-mailbox cleanup + IMAP polling.
+	// Background tasks: expired-mailbox cleanup + IMAP/Graph polling.
 	stop := make(chan struct{})
 	go runCleanup(emailH, cfg.CleanupIntervalMin, stop)
 	if cfg.IMAP.Host != "" {

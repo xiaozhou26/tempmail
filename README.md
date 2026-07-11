@@ -30,6 +30,29 @@
 - **中转邮箱**：任意支持 Graph/IMAP 的邮箱（个人 Outlook 推荐 Graph 模式）。
 - **Go 后端**：定时读取中转邮箱新邮件，按收件地址路由到对应临时邮箱并入库。
 
+## 项目结构
+
+```
+.
+├── main.go                 # 入口：路由 + 定时清理 + 收信 poller
+├── config/config.go        # 环境变量配置 + refresh_token 轮换写回
+├── models/models.go        # GORM 数据模型 (Mailbox / Message)
+├── storage/db.go           # SQLite 初始化与自动迁移
+├── middleware/auth.go      # API Key 与 Webhook Secret 鉴权
+├── handlers/
+│   ├── email.go            # 邮箱创建/查询/删除
+│   ├── message.go          # 邮件查询/删除（detail 含 raw）
+│   ├── webhook.go          # 可选 webhook 入口（默认禁用）
+│   ├── store.go            # IMAP/webhook 通用：解析 RFC822 并存储
+│   └── graph_store.go      # Graph 模式：把 Graph JSON 邮件存库
+├── graph/poller.go         # Graph API 轮询器（推荐）
+├── imap/poller.go          # IMAP 轮询器（备选）
+├── tools/get_graph_token.py # 获取 Graph refresh_token 的脱敏脚本
+├── Dockerfile              # 多阶段构建静态镜像
+├── build.sh                # 本地交叉编译
+├── .github/workflows/release.yml  # 打 tag 自动发版（二进制 + GHCR 镜像）
+└── .env.example
+```
 
 ## 前置条件
 
@@ -68,10 +91,47 @@ graph poller started: your-account@outlook.com every 60s
 SQLite 用纯 Go 驱动，无需 CGO，直接交叉编译：
 
 ```bash
-bash build.sh          # 输出 dist/tempmail-linux-amd64（静态二进制）
+bash build.sh                                          # dist/tempmail-linux-amd64
+VERSION=v1.0.0 PLATFORMS="linux/amd64 linux/arm64" bash build.sh
 ```
 
-把 `dist/tempmail-linux-amd64` 和 `.env` 上传到服务器即可运行。
+把二进制和 `.env` 上传到服务器即可运行。
+
+### Docker
+
+镜像由 GitHub Actions 推送到 GHCR（`ghcr.io/xiaozhou26/tempmail`）。也可本地构建：
+
+```bash
+docker build -t tempmail:local --build-arg VERSION=v1.0.0 .
+```
+
+运行：
+
+```bash
+# 先准备好 .env（至少 MAIL_DOMAIN / API_KEY / 收信凭据）
+docker run -d --name tempmail   -p 8080:8080   -v tempmail-data:/data   --env-file .env   ghcr.io/xiaozhou26/tempmail:1.0.0
+```
+
+- 监听 `LISTEN_ADDR`（默认 `:8080`），SQLite 默认写在 `/data/tempmail.db`（已挂 volume）。
+- Graph/IMAP 若会轮换 `refresh_token`，容器内默认无法持久写回 `.env`；请把 token 当环境变量传入，或挂载可写的 `.env` 到工作目录 `/app/.env`。
+- 健康检查：`GET /healthz` → `{"ok":true,"version":"..."}`。
+
+### 发布 1.0.0（GitHub Actions）
+
+推送语义化 tag 会触发 [`.github/workflows/release.yml`](.github/workflows/release.yml)：
+
+1. 交叉编译静态二进制：`linux/amd64`、`linux/arm64`、`darwin/amd64`、`darwin/arm64`、`windows/amd64`
+2. 构建并推送多架构 Docker 镜像到 GHCR：`linux/amd64` + `linux/arm64`（tag：`1.0.0` / `1.0` / `1` / `latest`）
+3. 创建 GitHub Release，附带二进制与 `checksums.txt`
+
+```bash
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+也可在 Actions 页对 `Release` workflow 做 **Run workflow**，并填入 tag（如 `v1.0.0`）。
+
+首次推送后 GHCR 包可能是 private，到仓库 **Packages** 里改成 Public 即可匿名拉取。
 
 ## 三、API 使用
 
@@ -164,7 +224,7 @@ IMAP_TOKEN_SCOPE=https://outlook.office.com/IMAP.AccessAsUser.All offline_access
 | `IMAP_AUTH_MODE` | `plain` 或 `oauth2` | `plain` |
 | `WEBHOOK_SECRET` | 可选 webhook 共享密钥 | （留空=禁用） |
 | `LISTEN_ADDR` | 监听地址 | `:8080` |
-| `DB_PATH` | SQLite 路径 | `./data/tempmail.db` |
+| `DB_PATH` | SQLite 路径 | `./data/tempmail.db`（Docker 默认 `/data/tempmail.db`） |
 | `DEFAULT_TTL_HOURS` | 新建邮箱存活时长（小时） | `24` |
 | `CLEANUP_INTERVAL_MIN` | 过期清理间隔（分钟） | `30` |
 

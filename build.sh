@@ -1,27 +1,53 @@
 #!/usr/bin/env bash
-# 交叉编译 tempmail 的 Linux amd64 二进制。
+# Cross-compile static tempmail binaries (pure-Go SQLite, no CGO).
 #
-# 使用纯 Go 的 SQLite 驱动 (modernc.org/sqlite via glebarez/sqlite)，
-# 因此 CGO_ENABLED=0 即可，不需要任何 C 交叉编译器，编出的是静态二进制。
-#
-# 用法:
-#   ./build.sh              # 输出 dist/tempmail-linux-amd64
-#   OUT=./tempmail ./build.sh
+# Usage:
+#   ./build.sh                              # default: linux/amd64 -> dist/tempmail-linux-amd64
+#   PLATFORMS="linux/amd64 linux/arm64" ./build.sh
+#   VERSION=v1.0.0 ./build.sh
+#   OUT=./tempmail GOOS=linux GOARCH=amd64 ./build.sh   # single custom output
 
 set -euo pipefail
 
-OUT="${OUT:-dist/tempmail-linux-amd64}"
+VERSION="${VERSION:-dev}"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$ROOT"
 
-echo "==> 交叉编译 tempmail -> Linux amd64 (纯 Go, 静态二进制)"
+# Single-output mode when OUT is set (or GOOS/GOARCH pair without PLATFORMS).
+if [[ -n "${OUT:-}" ]]; then
+  GOOS="${GOOS:-linux}"
+  GOARCH="${GOARCH:-amd64}"
+  echo "==> build ${GOOS}/${GOARCH} -> ${OUT} (version=${VERSION})"
+  mkdir -p "$(dirname "$OUT")"
+  CGO_ENABLED=0 GOOS="$GOOS" GOARCH="$GOARCH" \
+    go build -trimpath \
+      -ldflags="-s -w -X main.version=${VERSION}" \
+      -o "$OUT" .
+  ls -lh "$OUT"
+  file "$OUT" 2>/dev/null || true
+  exit 0
+fi
 
-mkdir -p "$(dirname "$OUT")"
+PLATFORMS="${PLATFORMS:-linux/amd64}"
 
-CGO_ENABLED=0 \
-GOOS=linux \
-GOARCH=amd64 \
-go build -trimpath -ldflags="-s -w" -o "$OUT" .
+echo "==> building tempmail (version=${VERSION})"
+mkdir -p dist
 
-echo "==> 完成: $OUT"
-ls -lh "$OUT"
-file "$OUT" 2>/dev/null || true
-echo "==> 部署: 上传 $OUT 到服务器，配合 .env 运行: ./$OUT"
+for platform in $PLATFORMS; do
+  GOOS="${platform%/*}"
+  GOARCH="${platform#*/}"
+  EXT=""
+  if [[ "$GOOS" == "windows" ]]; then
+    EXT=".exe"
+  fi
+  OUT="dist/tempmail-${GOOS}-${GOARCH}${EXT}"
+  echo "--> ${GOOS}/${GOARCH} -> ${OUT}"
+  CGO_ENABLED=0 GOOS="$GOOS" GOARCH="$GOARCH" \
+    go build -trimpath \
+      -ldflags="-s -w -X main.version=${VERSION}" \
+      -o "$OUT" .
+  ls -lh "$OUT"
+  file "$OUT" 2>/dev/null || true
+done
+
+echo "==> done. Deploy: upload binary + .env, then run it."
