@@ -19,15 +19,13 @@ import (
 	"tempmail/handlers"
 )
 
-// Poller periodically connects to an IMAP server, fetches unread messages, and
-// stores them. It marks fetched messages as \Seen so they are not re-fetched.
+// Poller connects to an IMAP server, fetches unread messages, and stores them.
+// Prefer FetchOnce (on-demand). Run is optional continuous polling.
 //
-// Speed-oriented behaviour:
-//   - keeps one TCP/TLS session open and reuses it across polls
-//   - drains unread mail immediately after a hit (no wait for next interval)
-//   - uses IMAP IDLE when the server supports it, so new mail wakes the poller
-//     without waiting for the full poll interval
-//   - otherwise polls every Interval (default 1s)
+// Behaviour:
+//   - reuses one TCP/TLS session across FetchOnce calls when possible
+//   - drains all unread mail in a single FetchOnce
+//   - Run may use IMAP IDLE when continuously polling
 type Poller struct {
 	DB       *gorm.DB
 	Domain   string
@@ -59,10 +57,50 @@ type Poller struct {
 
 	// shared HTTP client for OAuth token exchange
 	httpClient *http.Client
+
+	// connMu guards the reused IMAP client for on-demand FetchOnce.
+	connMu sync.Mutex
+	conn   *client.Client
 }
 
-// Run blocks until stop is closed.
+// FetchOnce connects (or reuses a connection), drains UNSEEN messages into the
+// DB, and returns. Safe for concurrent use only if serialized (ingest.OnDemand).
+func (p *Poller) FetchOnce() error {
+	if p.Mailbox == "" {
+		p.Mailbox = "INBOX"
+	}
+	if p.httpClient == nil {
+		p.httpClient = &http.Client{Timeout: 20 * time.Second}
+	}
+
+	p.connMu.Lock()
+	defer p.connMu.Unlock()
+
+	if p.conn == nil {
+		c, err := p.connect()
+		if err != nil {
+			return err
+		}
+		p.conn = c
+	}
+
+	// Drain until no unread remain.
+	for {
+		fetched, err := p.fetchUnread(p.conn)
+		if err != nil {
+			_ = p.conn.Logout()
+			p.conn = nil
+			return err
+		}
+		if fetched == 0 {
+			return nil
+		}
+	}
+}
+
+// Run continuously polls until stop is closed (optional; prefer on-demand).
 func (p *Poller) Run(stop <-chan struct{}) {
+
 	base := p.Interval
 	if base <= 0 {
 		base = time.Second

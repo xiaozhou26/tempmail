@@ -65,18 +65,18 @@ The application is assembled in `main.go`:
 - `handlers/store.go` contains the shared ingestion business logic for RFC822 (IMAP/webhook). It parses with `enmime`, resolves a recipient on the configured domain, lazily creates a mailbox when necessary, and persists the parsed message plus the raw source.
 - `handlers/graph_store.go` stores Graph JSON messages into the same models.
 - `handlers/webhook.go` validates and accepts pushed raw messages, then delegates to `StoreMessage`.
-- `imap/poller.go` / `graph/poller.go` poll the relay inbox and mark processed messages to avoid reprocessing.
+- `imap/poller.go` / `graph/poller.go` provide FetchOnce for on-demand relay reads; `ingest.OnDemand` is triggered by GET message endpoints (no background poll by default).
 - `main.version` is injected at link time (`-X main.version=...`) and exposed via `/healthz`.
 
 The normal mail flow is:
 
 ```text
-Cloudflare Email Routing -> relay inbox -> graph/imap Poller -> handlers store -> GORM/SQLite
+Cloudflare Email Routing -> relay inbox; client GET messages -> ingest.OnDemand -> graph/imap FetchOnce -> handlers store -> GORM/SQLite
                                                    ^
 Optional authenticated webhook -> handlers.StoreMessage
 ```
 
-The HTTP server exposes `/healthz` without authentication, management routes under `/api` behind API-key middleware, and `/api/webhook/email` behind webhook-secret middleware. `main.go` also starts the expiry-cleanup ticker, starts Graph or IMAP poller when configured, and performs a five-second graceful HTTP shutdown on SIGINT/SIGTERM.
+The HTTP server exposes `/healthz` without authentication, management routes under `/api` behind API-key middleware, and `/api/webhook/email` behind webhook-secret middleware. `main.go` starts the expiry-cleanup ticker, wires Graph or IMAP as an on-demand fetcher (no background poll), and performs a five-second graceful HTTP shutdown on SIGINT/SIGTERM.
 
 ## Implementation notes
 

@@ -10,19 +10,21 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
+	"tempmail/ingest"
 	"tempmail/models"
 )
 
 type EmailHandler struct {
-	DB        *gorm.DB
-	Domain    string
-	TTLHours  int
+	DB       *gorm.DB
+	Domain   string
+	TTLHours int
+	Ingest   *ingest.OnDemand // optional; GetMailbox triggers a relay fetch first
 }
 
 // CreateMailboxRequest is the body for POST /api/mailboxes.
 type CreateMailboxRequest struct {
-	Name      string `json:"name"`        // optional custom local-part; random if empty
-	TTLHours  int    `json:"ttl_hours"`   // optional override; defaults to server config
+	Name     string `json:"name"`      // optional custom local-part; random if empty
+	TTLHours int    `json:"ttl_hours"` // optional override; defaults to server config
 }
 
 // CreateMailbox registers a new temporary mailbox and returns its address.
@@ -81,7 +83,13 @@ func (h *EmailHandler) ListMailboxes(c *gin.Context) {
 
 // GetMailbox returns a single mailbox by address, including its messages.
 // GET /api/mailboxes/:address
+//
+// When on-demand ingestion is configured, this endpoint first pulls new mail
+// from the relay inbox so the embedded messages list is fresh.
 func (h *EmailHandler) GetMailbox(c *gin.Context) {
+	if h.Ingest != nil {
+		_ = h.Ingest.Sync()
+	}
 	address := strings.ToLower(c.Param("address"))
 	var mb models.Mailbox
 	err := h.DB.Preload("Messages", func(db *gorm.DB) *gorm.DB {

@@ -28,7 +28,7 @@
 
 - **Cloudflare 侧**：开启 Email Routing，把 `*@yourdomain` 配为 catch-all **转发到目标邮箱**（不是 Send t Worker）。
 - **中转邮箱**：任意支持 Graph/IMAP 的邮箱（个人 Outlook 推荐 Graph 模式）。
-- **Go 后端**：定时读取中转邮箱新邮件，按收件地址路由到对应临时邮箱并入库。
+- **Go 后端**：在客户端查询邮件时按需读取中转邮箱新邮件，按收件地址路由到对应临时邮箱并入库。
 
 ## 项目结构
 
@@ -153,23 +153,20 @@ curl -H "X-API-Key: $API_KEY" \
   https://api.yourdomain.com/api/mailboxes/alice@yourdomain.com/messages
 ```
 
-## 收信延迟（速度）
+## 收信方式：按需拉取（on-demand）
 
-默认已针对「尽快看到验证码邮件」做了优化：
+**不再后台常驻轮询。** 只有客户端请求邮件相关接口时，才会去 Graph/IMAP 拉一次中转邮箱：
 
-| 模式 | 默认间隔 | 加速手段 |
-|------|----------|----------|
-| **Graph** | **1s** | 固定每秒轮询；整页 50 封时立即连拉 |
-| **IMAP** | **1s** | **连接复用**；支持 **IMAP IDLE** 时近实时；否则每秒 SEARCH；有未读立即排空 |
+| 触发接口 | 行为 |
+|----------|------|
+| `GET /api/mailboxes/:address/messages` | 先拉取中转邮箱新邮件，再返回该邮箱列表 |
+| `GET /api/mailboxes/:address` | 同上（响应里带 messages） |
+| `GET /api/messages/:id` | 先拉取，再返回详情 |
 
-可在 `.env` 调更激进（注意邮箱提供商限流）：
+并发请求会合并成一次拉取；1 秒内的重复请求会直接读库（`MinInterval=1s`），避免打爆 Graph/IMAP。
 
-```env
-GRAPH_POLL_INTERVAL_SEC=1
-IMAP_POLL_INTERVAL_SEC=1
-```
+> Cloudflare Email Routing 转发延迟仍是主要下限。Webhook 模式不受影响。
 
-> Cloudflare Email Routing 本身的转发延迟通常是主要下限（数秒到数十秒），poller 只能优化「转发到中转邮箱之后」这一段。
 
 ## 收信模式
 

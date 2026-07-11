@@ -19,13 +19,13 @@ import (
 	"tempmail/handlers"
 )
 
-// Poller periodically reads new messages from the relay inbox via Graph.
+// Poller reads new messages from the relay inbox via Graph.
+// Prefer FetchOnce (on-demand). Run is optional continuous polling.
 //
-// Speed-oriented behaviour:
-//   - fixed poll interval (default 1s)
-//   - dedicated HTTP client with timeouts (no DefaultClient stalls)
+// Behaviour:
+//   - dedicated HTTP client with timeouts
 //   - reuses access tokens until near expiry
-//   - drains a page of new mail and immediately re-polls when the page was full
+//   - drains full pages in a single FetchOnce call
 type Poller struct {
 	DB *gorm.DB
 	// Domain used to route a message to the right temporary mailbox.
@@ -60,35 +60,37 @@ const (
 	pageSize     = 50
 )
 
-// Run blocks until stop is closed, polling once per Interval (default 1s).
+// FetchOnce pulls new mail once (and drains full pages). Safe for concurrent
+// callers only if serialized externally (use ingest.OnDemand).
+func (p *Poller) FetchOnce() error {
+	if p.httpClient == nil {
+		p.httpClient = &http.Client{Timeout: 30 * time.Second}
+	}
+	if p.since.IsZero() {
+		p.since = time.Now().Add(-2 * time.Minute)
+	}
+	// Drain until a partial page so backlog is cleared in one client request.
+	for {
+		_, full, err := p.pollOnce()
+		if err != nil {
+			return err
+		}
+		if !full {
+			return nil
+		}
+	}
+}
+
+// Run continuously polls until stop is closed (optional; prefer on-demand).
 func (p *Poller) Run(stop <-chan struct{}) {
 	base := p.Interval
 	if base <= 0 {
 		base = time.Second
 	}
-	if p.httpClient == nil {
-		p.httpClient = &http.Client{Timeout: 30 * time.Second}
-	}
-
-	// Start the high-water mark a little in the past so the first poll also
-	// picks up very recently arrived mail, then advance it as we read.
-	if p.since.IsZero() {
-		p.since = time.Now().Add(-2 * time.Minute)
-	}
-
-	// Poll once immediately on startup so you don't wait a full interval.
 	for {
-		_, fullPage := p.pollOnce()
-		// Page was full — more mail may be waiting; drain without sleeping.
-		if fullPage {
-			select {
-			case <-stop:
-				return
-			default:
-				continue
-			}
+		if err := p.FetchOnce(); err != nil {
+			log.Printf("graph poll: %v", err)
 		}
-
 		t := time.NewTimer(base)
 		select {
 		case <-stop:
@@ -99,14 +101,11 @@ func (p *Poller) Run(stop <-chan struct{}) {
 	}
 }
 
-// pollOnce returns (hadWork, fullPage).
-// hadWork is true when any message was returned by Graph (stored or skipped).
-// fullPage is true when the response filled the page size (likely more to fetch).
-func (p *Poller) pollOnce() (hadWork bool, fullPage bool) {
+// pollOnce returns (hadWork, fullPage, err).
+func (p *Poller) pollOnce() (hadWork bool, fullPage bool, err error) {
 	token, err := p.fetchAccessToken()
 	if err != nil {
-		log.Printf("graph token: %v", err)
-		return false, false
+		return false, false, err
 	}
 
 	// Incremental fetch: only messages received after the high-water mark.
@@ -122,8 +121,7 @@ func (p *Poller) pollOnce() (hadWork bool, fullPage bool) {
 
 	req, err := http.NewRequest("GET", endpoint, nil)
 	if err != nil {
-		log.Printf("graph request: %v", err)
-		return false, false
+		return false, false, err
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	// Prefer allows advanced filters; also keep latency-friendly defaults.
@@ -132,25 +130,22 @@ func (p *Poller) pollOnce() (hadWork bool, fullPage bool) {
 
 	resp, err := p.httpClient.Do(req)
 	if err != nil {
-		log.Printf("graph fetch: %v", err)
-		return false, false
+		return false, false, err
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<20)) // 8 MiB cap
 	if resp.StatusCode != 200 {
-		log.Printf("graph fetch %d: %s", resp.StatusCode, string(body))
-		return false, false
+		return false, false, fmt.Errorf("graph fetch %d: %s", resp.StatusCode, string(body))
 	}
 
 	var result struct {
 		Value []handlers.GraphMessage `json:"value"`
 	}
 	if err := json.Unmarshal(body, &result); err != nil {
-		log.Printf("graph decode: %v", err)
-		return false, false
+		return false, false, err
 	}
 	if len(result.Value) == 0 {
-		return false, false
+		return false, false, nil
 	}
 
 	var stored, skipped int
@@ -187,7 +182,7 @@ func (p *Poller) pollOnce() (hadWork bool, fullPage bool) {
 		}
 	}
 	log.Printf("graph poll: fetched %d, stored %d, skipped %d", len(result.Value), stored, skipped)
-	return stored > 0 || full, full
+	return stored > 0 || full, full, nil
 }
 
 func (p *Poller) fetchAccessToken() (string, error) {

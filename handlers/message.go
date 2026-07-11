@@ -7,11 +7,13 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
+	"tempmail/ingest"
 	"tempmail/models"
 )
 
 type MessageHandler struct {
-	DB *gorm.DB
+	DB     *gorm.DB
+	Ingest *ingest.OnDemand // optional; when set, list/get trigger a relay fetch first
 }
 
 // messageDetail wraps a Message so the raw RFC822 source (which the model
@@ -22,9 +24,20 @@ type messageDetail struct {
 	Raw string `json:"raw"`
 }
 
+func (h *MessageHandler) sync() {
+	if h.Ingest != nil {
+		_ = h.Ingest.Sync()
+	}
+}
+
 // ListMessages lists messages for a mailbox, newest first.
 // GET /api/mailboxes/:address/messages
+//
+// When on-demand ingestion is configured, this endpoint first pulls new mail
+// from the relay inbox, then returns whatever is stored for the mailbox.
 func (h *MessageHandler) ListMessages(c *gin.Context) {
+	h.sync()
+
 	address := strings.ToLower(c.Param("address"))
 	var mb models.Mailbox
 	if err := h.DB.First(&mb, "address = ?", address).Error; errors.Is(err, gorm.ErrRecordNotFound) {
@@ -39,6 +52,8 @@ func (h *MessageHandler) ListMessages(c *gin.Context) {
 // GetMessage returns a single message including the raw source.
 // GET /api/messages/:id
 func (h *MessageHandler) GetMessage(c *gin.Context) {
+	h.sync()
+
 	var msg models.Message
 	if err := h.DB.First(&msg, c.Param("id")).Error; errors.Is(err, gorm.ErrRecordNotFound) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "message not found"})

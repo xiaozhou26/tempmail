@@ -14,6 +14,7 @@ import (
 	graphpoll "tempmail/graph"
 	"tempmail/handlers"
 	imappoll "tempmail/imap"
+	"tempmail/ingest"
 	"tempmail/middleware"
 	"tempmail/storage"
 )
@@ -36,6 +37,78 @@ func main() {
 	emailH := &handlers.EmailHandler{DB: db, Domain: cfg.Domain, TTLHours: cfg.DefaultTTLHours}
 	msgH := &handlers.MessageHandler{DB: db}
 	webhookH := &handlers.WebhookHandler{DB: db, Domain: cfg.Domain}
+
+	// On-demand ingestion: only fetch from Graph/IMAP when a client asks for mail.
+	var onDemand *ingest.OnDemand
+
+	// Background cleanup only. Mail is fetched on demand when clients hit
+	// message-related endpoints (see ingest.OnDemand).
+	stop := make(chan struct{})
+	go runCleanup(emailH, cfg.CleanupIntervalMin, stop)
+
+	// Graph takes priority over IMAP when enabled (matches README / config.Load).
+	if cfg.Graph.Enabled {
+		gpoller := &graphpoll.Poller{
+			DB:           db,
+			Domain:       cfg.Domain,
+			ClientID:     cfg.Graph.ClientID,
+			ClientSecret: cfg.Graph.ClientSecret,
+			TenantID:     cfg.Graph.TenantID,
+			RefreshToken: cfg.Graph.RefreshToken,
+			TokenScope:   cfg.Graph.TokenScope,
+			Account:      cfg.Graph.Account,
+			MailFolder:   cfg.Graph.MailFolder,
+			Interval:     time.Duration(cfg.Graph.PollIntervalSec) * time.Second,
+			OnRotated: func(newRefreshToken string) {
+				if err := config.PersistRefreshToken(".env", "GRAPH_REFRESH_TOKEN", newRefreshToken); err != nil {
+					log.Printf("persist graph refresh token: %v", err)
+				} else {
+					log.Printf("graph refresh token rotated and saved to .env")
+				}
+			},
+		}
+		onDemand = &ingest.OnDemand{
+			Fetcher:     gpoller,
+			MinInterval: time.Second, // coalesce bursty client polls
+		}
+		log.Printf("graph on-demand fetch ready: %s (triggered by GET messages)",
+			cfg.Graph.Account)
+	} else if cfg.IMAP.Host != "" {
+		poller := &imappoll.Poller{
+			DB:       db,
+			Domain:   cfg.Domain,
+			Host:     cfg.IMAP.Host,
+			Port:     cfg.IMAP.Port,
+			Username: cfg.IMAP.Username,
+			Password: cfg.IMAP.Password,
+			Mailbox:  cfg.IMAP.Mailbox,
+			UseTLS:   cfg.IMAP.UseTLS,
+			Interval: time.Duration(cfg.IMAP.PollIntervalSec) * time.Second,
+
+			AuthMode:     cfg.IMAP.AuthMode,
+			ClientID:     cfg.IMAP.ClientID,
+			TenantID:     cfg.IMAP.TenantID,
+			RefreshToken: cfg.IMAP.RefreshToken,
+			TokenScope:   cfg.IMAP.TokenScope,
+			OnRotated: func(newRefreshToken string) {
+				if err := config.PersistRefreshToken(".env", "IMAP_REFRESH_TOKEN", newRefreshToken); err != nil {
+					log.Printf("persist refresh token: %v", err)
+				} else {
+					log.Printf("refresh token rotated and saved to .env")
+				}
+			},
+		}
+		onDemand = &ingest.OnDemand{
+			Fetcher:     poller,
+			MinInterval: time.Second,
+		}
+		log.Printf("imap on-demand fetch ready: %s@%s:%d (triggered by GET messages)",
+			cfg.IMAP.Username, cfg.IMAP.Host, cfg.IMAP.Port)
+	} else {
+		log.Printf("WARNING: no Graph/IMAP configured; running in webhook-only mode")
+	}
+	emailH.Ingest = onDemand
+	msgH.Ingest = onDemand
 
 	r := gin.Default()
 	r.GET("/healthz", func(c *gin.Context) {
@@ -61,67 +134,6 @@ func main() {
 		Addr:              cfg.ListenAddr,
 		Handler:           r,
 		ReadHeaderTimeout: 10 * time.Second,
-	}
-
-	// Background tasks: expired-mailbox cleanup + IMAP/Graph polling.
-	stop := make(chan struct{})
-	go runCleanup(emailH, cfg.CleanupIntervalMin, stop)
-	// Graph takes priority over IMAP when enabled (matches README / config.Load).
-	if cfg.Graph.Enabled {
-		gpoller := &graphpoll.Poller{
-			DB:           db,
-			Domain:       cfg.Domain,
-			ClientID:     cfg.Graph.ClientID,
-			ClientSecret: cfg.Graph.ClientSecret,
-			TenantID:     cfg.Graph.TenantID,
-			RefreshToken: cfg.Graph.RefreshToken,
-			TokenScope:   cfg.Graph.TokenScope,
-			Account:      cfg.Graph.Account,
-			MailFolder:   cfg.Graph.MailFolder,
-			Interval:     time.Duration(cfg.Graph.PollIntervalSec) * time.Second,
-			OnRotated: func(newRefreshToken string) {
-				if err := config.PersistRefreshToken(".env", "GRAPH_REFRESH_TOKEN", newRefreshToken); err != nil {
-					log.Printf("persist graph refresh token: %v", err)
-				} else {
-					log.Printf("graph refresh token rotated and saved to .env")
-				}
-			},
-		}
-		go gpoller.Run(stop)
-		log.Printf("graph poller started: %s every %ds",
-			cfg.Graph.Account, cfg.Graph.PollIntervalSec)
-	} else if cfg.IMAP.Host != "" {
-		poller := &imappoll.Poller{
-			DB:       db,
-			Domain:   cfg.Domain,
-			Host:     cfg.IMAP.Host,
-			Port:     cfg.IMAP.Port,
-			Username: cfg.IMAP.Username,
-			Password: cfg.IMAP.Password,
-			Mailbox:  cfg.IMAP.Mailbox,
-			UseTLS:   cfg.IMAP.UseTLS,
-			Interval: time.Duration(cfg.IMAP.PollIntervalSec) * time.Second,
-
-			AuthMode:     cfg.IMAP.AuthMode,
-			ClientID:     cfg.IMAP.ClientID,
-			TenantID:     cfg.IMAP.TenantID,
-			RefreshToken: cfg.IMAP.RefreshToken,
-			TokenScope:   cfg.IMAP.TokenScope,
-			OnRotated: func(newRefreshToken string) {
-				// MSA rotates the refresh token on every exchange; persist it
-				// back to .env so the next restart doesn't hit invalid_grant.
-				if err := config.PersistRefreshToken(".env", "IMAP_REFRESH_TOKEN", newRefreshToken); err != nil {
-					log.Printf("persist refresh token: %v", err)
-				} else {
-					log.Printf("refresh token rotated and saved to .env")
-				}
-			},
-		}
-		go poller.Run(stop)
-		log.Printf("imap poller started: %s@%s:%d every %ds (IDLE when supported)",
-			cfg.IMAP.Username, cfg.IMAP.Host, cfg.IMAP.Port, cfg.IMAP.PollIntervalSec)
-	} else {
-		log.Printf("WARNING: no Graph/IMAP configured; running in webhook-only mode")
 	}
 
 	go func() {
