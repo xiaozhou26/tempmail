@@ -1,11 +1,13 @@
 package imappoll
 
 import (
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -33,9 +35,13 @@ type Poller struct {
 	Port     int
 	Username string
 	Password string
-	Mailbox  string        // INBOX by default
-	UseTLS   bool          // true = DialTLS, false = plain (NOT recommended)
-	Interval time.Duration // poll interval when IDLE is unavailable; defaults to 1s
+	Mailbox  string // INBOX by default
+	UseTLS   bool   // true = DialTLS (implicit TLS, port 993) — Firstmail/Gmail
+	// StartTLS upgrades a plain TCP connection. Ignored when UseTLS is true.
+	StartTLS bool
+	// InsecureSkipVerify skips TLS cert verification (debug only).
+	InsecureSkipVerify bool
+	Interval           time.Duration // poll interval when IDLE is unavailable; defaults to 1s
 
 	// Outlook OAuth2 / XOAUTH2
 	AuthMode     string // plain | oauth2
@@ -342,23 +348,57 @@ func (p *Poller) fetchUnread(c *client.Client) (int, error) {
 	return len(ids), nil
 }
 
+func (p *Poller) tlsConfig() *tls.Config {
+	return &tls.Config{
+		ServerName:         p.Host,
+		InsecureSkipVerify: p.InsecureSkipVerify, //nolint:gosec // optional escape hatch
+		MinVersion:         tls.VersionTLS12,
+	}
+}
+
 func (p *Poller) connect() (*client.Client, error) {
-	addr := fmt.Sprintf("%s:%d", p.Host, p.Port)
+	if p.Host == "" {
+		return nil, fmt.Errorf("imap host is empty")
+	}
+	port := p.Port
+	if port == 0 {
+		if p.UseTLS {
+			port = 993
+		} else {
+			port = 143
+		}
+	}
+	addr := net.JoinHostPort(p.Host, fmt.Sprintf("%d", port))
+
 	var c *client.Client
 	var err error
-	if p.UseTLS {
-		c, err = client.DialTLS(addr, nil)
-	} else {
+	switch {
+	case p.UseTLS:
+		// Implicit TLS — Firstmail (imap.firstmail.ltd:993), Gmail, most hosts.
+		c, err = client.DialTLS(addr, p.tlsConfig())
+	case p.StartTLS:
+		c, err = client.Dial(addr)
+		if err == nil {
+			if err = c.StartTLS(p.tlsConfig()); err != nil {
+				_ = c.Logout()
+				return nil, fmt.Errorf("starttls: %w", err)
+			}
+		}
+	default:
 		c, err = client.Dial(addr)
 	}
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("dial %s: %w", addr, err)
 	}
 
-	// Slightly tighter I/O deadline defaults help detect half-open sockets.
 	c.Timeout = 60 * time.Second
 
-	if p.AuthMode == "oauth2" {
+	mode := strings.ToLower(strings.TrimSpace(p.AuthMode))
+	if mode == "" {
+		mode = "plain"
+	}
+
+	if mode == "oauth2" {
 		token, err := p.fetchAccessToken()
 		if err != nil {
 			_ = c.Logout()
@@ -369,9 +409,10 @@ func (p *Poller) connect() (*client.Client, error) {
 			return nil, fmt.Errorf("xoauth2 authenticate: %w", err)
 		}
 	} else {
+		// Plain LOGIN — Firstmail, Gmail app password, most providers.
 		if err := c.Login(p.Username, p.Password); err != nil {
 			_ = c.Logout()
-			return nil, err
+			return nil, fmt.Errorf("login as %q: %w", p.Username, err)
 		}
 	}
 

@@ -75,15 +75,17 @@ func main() {
 			cfg.Graph.Account)
 	} else if cfg.IMAP.Host != "" {
 		poller := &imappoll.Poller{
-			DB:       db,
-			Domain:   cfg.Domain,
-			Host:     cfg.IMAP.Host,
-			Port:     cfg.IMAP.Port,
-			Username: cfg.IMAP.Username,
-			Password: cfg.IMAP.Password,
-			Mailbox:  cfg.IMAP.Mailbox,
-			UseTLS:   cfg.IMAP.UseTLS,
-			Interval: time.Duration(cfg.IMAP.PollIntervalSec) * time.Second,
+			DB:                 db,
+			Domain:             cfg.Domain,
+			Host:               cfg.IMAP.Host,
+			Port:               cfg.IMAP.Port,
+			Username:           cfg.IMAP.Username,
+			Password:           cfg.IMAP.Password,
+			Mailbox:            cfg.IMAP.Mailbox,
+			UseTLS:             cfg.IMAP.UseTLS,
+			StartTLS:           cfg.IMAP.StartTLS,
+			InsecureSkipVerify: cfg.IMAP.InsecureSkipVerify,
+			Interval:           time.Duration(cfg.IMAP.PollIntervalSec) * time.Second,
 
 			AuthMode:     cfg.IMAP.AuthMode,
 			ClientID:     cfg.IMAP.ClientID,
@@ -102,8 +104,8 @@ func main() {
 			Fetcher:     poller,
 			MinInterval: time.Second,
 		}
-		log.Printf("imap on-demand fetch ready: %s@%s:%d (triggered by GET messages)",
-			cfg.IMAP.Username, cfg.IMAP.Host, cfg.IMAP.Port)
+		log.Printf("imap on-demand fetch ready: %s@%s:%d tls=%v (triggered by GET messages)",
+			cfg.IMAP.Username, cfg.IMAP.Host, cfg.IMAP.Port, cfg.IMAP.UseTLS)
 	} else {
 		log.Printf("WARNING: no Graph/IMAP configured; running in webhook-only mode")
 	}

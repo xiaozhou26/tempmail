@@ -17,8 +17,12 @@ type IMAPConfig struct {
 	Username string
 	Password string
 	Mailbox  string // typically "INBOX"
-	UseTLS   bool
-	// How often the poller checks for new mail.
+	UseTLS   bool   // true = implicit TLS (port 993 DialTLS)
+	// StartTLS upgrades a plain connection with STARTTLS (port 143). Ignored when UseTLS is true.
+	StartTLS bool
+	// InsecureSkipVerify disables TLS certificate verification (not recommended).
+	InsecureSkipVerify bool
+	// How often continuous polling would check for new mail (on-demand uses MinInterval).
 	PollIntervalSec int
 
 	// Outlook OAuth2 / XOAUTH2 fields.
@@ -66,6 +70,19 @@ type Config struct {
 	CleanupIntervalMin int
 }
 
+// knownIMAPProviders fills host/port/tls defaults for common providers when
+// IMAP_PROVIDER is set. Firstmail: imap.firstmail.ltd:993 SSL + plain LOGIN.
+var knownIMAPProviders = map[string]struct {
+	Host     string
+	Port     int
+	UseTLS   bool
+	StartTLS bool
+}{
+	"firstmail": {Host: "imap.firstmail.ltd", Port: 993, UseTLS: true},
+	"gmail":     {Host: "imap.gmail.com", Port: 993, UseTLS: true},
+	"outlook":   {Host: "outlook.office365.com", Port: 993, UseTLS: true},
+}
+
 // Load reads .env (if present) and environment variables, applying sensible defaults.
 func Load() (*Config, error) {
 	// .env is optional; ignore error when the file is missing.
@@ -107,18 +124,20 @@ func Load() (*Config, error) {
 		DefaultTTLHours:    24,
 		CleanupIntervalMin: 30,
 		IMAP: IMAPConfig{
-			Host:            get("IMAP_HOST", ""),
-			Port:            993,
-			Username:        get("IMAP_USER", ""),
-			Password:        get("IMAP_PASS", ""),
-			Mailbox:         get("IMAP_MAILBOX", "INBOX"),
-			UseTLS:          getBool("IMAP_TLS", true),
-			PollIntervalSec: 1,
-			AuthMode:        get("IMAP_AUTH_MODE", "plain"),
-			ClientID:        get("IMAP_CLIENT_ID", ""),
-			TenantID:        get("IMAP_TENANT_ID", "consumers"),
-			RefreshToken:    get("IMAP_REFRESH_TOKEN", ""),
-			TokenScope:      get("IMAP_TOKEN_SCOPE", ""),
+			Host:               get("IMAP_HOST", ""),
+			Port:               993,
+			Username:           get("IMAP_USER", ""),
+			Password:           get("IMAP_PASS", ""),
+			Mailbox:            get("IMAP_MAILBOX", "INBOX"),
+			UseTLS:             getBool("IMAP_TLS", true),
+			StartTLS:           getBool("IMAP_STARTTLS", false),
+			InsecureSkipVerify: getBool("IMAP_TLS_INSECURE", false),
+			PollIntervalSec:    1,
+			AuthMode:           strings.ToLower(get("IMAP_AUTH_MODE", "plain")),
+			ClientID:           get("IMAP_CLIENT_ID", ""),
+			TenantID:           get("IMAP_TENANT_ID", "consumers"),
+			RefreshToken:       get("IMAP_REFRESH_TOKEN", ""),
+			TokenScope:         get("IMAP_TOKEN_SCOPE", ""),
 		},
 		Graph: GraphConfig{
 			Enabled:         get("GRAPH_ENABLED", "") == "true" || getBool("GRAPH_ENABLED", false),
@@ -131,6 +150,29 @@ func Load() (*Config, error) {
 			MailFolder:      get("GRAPH_MAIL_FOLDER", ""),
 			PollIntervalSec: 1,
 		},
+	}
+
+	// Apply IMAP_PROVIDER presets (firstmail / gmail / outlook) when fields are empty.
+	if prov := strings.ToLower(get("IMAP_PROVIDER", "")); prov != "" {
+		if preset, ok := knownIMAPProviders[prov]; ok {
+			if cfg.IMAP.Host == "" {
+				cfg.IMAP.Host = preset.Host
+			}
+			if strings.TrimSpace(os.Getenv("IMAP_PORT")) == "" {
+				cfg.IMAP.Port = preset.Port
+			}
+			if strings.TrimSpace(os.Getenv("IMAP_TLS")) == "" {
+				cfg.IMAP.UseTLS = preset.UseTLS
+			}
+			if strings.TrimSpace(os.Getenv("IMAP_STARTTLS")) == "" {
+				cfg.IMAP.StartTLS = preset.StartTLS
+			}
+			if cfg.IMAP.AuthMode == "" {
+				cfg.IMAP.AuthMode = "plain"
+			}
+		} else {
+			return nil, fmt.Errorf("unknown IMAP_PROVIDER %q (supported: firstmail, gmail, outlook)", prov)
+		}
 	}
 
 	if n, err := getInt("DEFAULT_TTL_HOURS", cfg.DefaultTTLHours); err == nil {
@@ -181,7 +223,7 @@ func Load() (*Config, error) {
 	// secret is configured there is no way to receive mail.
 	if cfg.IMAP.Host == "" {
 		if cfg.WebhookSecret == "" {
-			return nil, fmt.Errorf("IMAP_HOST is required (or set WEBHOOK_SECRET to use the optional webhook path)")
+			return nil, fmt.Errorf("IMAP_HOST is required (or set IMAP_PROVIDER=firstmail / WEBHOOK_SECRET)")
 		}
 		// Webhook-only mode: allowed but warned in main.go.
 	} else {
@@ -191,7 +233,7 @@ func Load() (*Config, error) {
 			}
 		} else {
 			if cfg.IMAP.Username == "" || cfg.IMAP.Password == "" {
-				return nil, fmt.Errorf("IMAP_USER and IMAP_PASS are required when IMAP_HOST is set")
+				return nil, fmt.Errorf("IMAP_USER and IMAP_PASS are required when IMAP_HOST is set (plain LOGIN, e.g. Firstmail)")
 			}
 		}
 	}

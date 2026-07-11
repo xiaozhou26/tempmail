@@ -192,7 +192,7 @@ python tools/get_graph_token.py
 
 ⚠️ **Microsoft refresh_token 每次换 access_token 都会轮换**，旧 token 立即失效。项目运行时会自动把新 token 写回 `.env`，所以**不要同时跑多个实例**，否则会互相覆盖。
 
-### IMAP 模式（Gmail 等）
+### IMAP 模式（Gmail / Firstmail 等）
 
 ```env
 IMAP_HOST=imap.gmail.com
@@ -201,7 +201,35 @@ IMAP_USER=your-relay@gmail.com
 IMAP_PASS=your-app-password
 IMAP_MAILBOX=INBOX
 IMAP_TLS=true
+IMAP_AUTH_MODE=plain
 ```
+
+#### Firstmail
+
+Firstmail 使用标准 **IMAP SSL + 账号密码 LOGIN**（无需 OAuth）：
+
+```env
+# 方式一：预设（推荐）
+IMAP_PROVIDER=firstmail
+IMAP_USER=your-account@your-firstmail-domain.com
+IMAP_PASS=your-password
+# 可选覆盖：
+# IMAP_HOST=imap.firstmail.ltd
+# IMAP_PORT=993
+# IMAP_TLS=true
+# IMAP_MAILBOX=INBOX
+
+# 方式二：手写完整配置
+IMAP_HOST=imap.firstmail.ltd
+IMAP_PORT=993
+IMAP_TLS=true
+IMAP_AUTH_MODE=plain
+IMAP_USER=your-account@your-firstmail-domain.com
+IMAP_PASS=your-password
+IMAP_MAILBOX=INBOX
+```
+
+> `IMAP_USER` 填完整邮箱地址；`IMAP_PASS` 为 Firstmail 邮箱密码。Cloudflare Email Routing 仍把 `*@MAIL_DOMAIN` 转发到该 Firstmail 中转箱即可。
 
 ### IMAP + Outlook OAuth2（XOAUTH2）
 
