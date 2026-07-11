@@ -69,8 +69,12 @@ type Poller struct {
 	conn   *client.Client
 }
 
-// FetchOnce connects (or reuses a connection), drains UNSEEN messages into the
-// DB, and returns. Safe for concurrent use only if serialized (ingest.OnDemand).
+// FetchOnce connects, drains UNSEEN messages into the DB, then closes the
+// session. Safe for concurrent use only if serialized (ingest.OnDemand).
+//
+// The connection is not kept idle between calls: many providers (and local
+// proxies) drop quiet TLS sessions, and go-imap's client Timeout would otherwise
+// log "i/o timeout" ~60s after the last command.
 func (p *Poller) FetchOnce() error {
 	if p.Mailbox == "" {
 		p.Mailbox = "INBOX"
@@ -82,20 +86,28 @@ func (p *Poller) FetchOnce() error {
 	p.connMu.Lock()
 	defer p.connMu.Unlock()
 
-	if p.conn == nil {
-		c, err := p.connect()
-		if err != nil {
-			return err
-		}
-		p.conn = c
+	// Drop any leftover session from a previous interrupted call.
+	if p.conn != nil {
+		_ = p.conn.Logout()
+		p.conn = nil
 	}
+
+	c, err := p.connect()
+	if err != nil {
+		return err
+	}
+	// Always close when done so the server/proxy does not hold a half-open
+	// socket that later surfaces as "error reading response: i/o timeout".
+	defer func() {
+		_ = c.Logout()
+		p.conn = nil
+	}()
+	p.conn = c
 
 	// Drain until no unread remain.
 	for {
-		fetched, err := p.fetchUnread(p.conn)
+		fetched, err := p.fetchUnread(c)
 		if err != nil {
-			_ = p.conn.Logout()
-			p.conn = nil
 			return err
 		}
 		if fetched == 0 {
@@ -391,7 +403,7 @@ func (p *Poller) connect() (*client.Client, error) {
 		return nil, fmt.Errorf("dial %s: %w", addr, err)
 	}
 
-	c.Timeout = 60 * time.Second
+	c.Timeout = 45 * time.Second
 
 	mode := strings.ToLower(strings.TrimSpace(p.AuthMode))
 	if mode == "" {
