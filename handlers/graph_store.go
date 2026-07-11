@@ -12,13 +12,14 @@ import (
 // project persists. Graph returns structured JSON (not RFC822), so we map its
 // fields onto models.Message directly instead of going through enmime.
 type GraphMessage struct {
-	ID             string         `json:"id"`
-	Subject        string         `json:"subject"`
-	From           graphAddr      `json:"from"`
-	ToRecipients   []graphRecip   `json:"toRecipients"`
-	Body           graphBody      `json:"body"`
-	ReceivedAt     string         `json:"receivedDateTime"`
-	InternetMsgID  string         `json:"internetMessageId"`
+	ID            string       `json:"id"`
+	Subject       string       `json:"subject"`
+	From          graphAddr    `json:"from"`
+	ToRecipients  []graphRecip `json:"toRecipients"`
+	CcRecipients  []graphRecip `json:"ccRecipients"`
+	Body          graphBody    `json:"body"`
+	ReceivedAt    string       `json:"receivedDateTime"`
+	InternetMsgID string       `json:"internetMessageId"`
 }
 
 type graphAddr struct {
@@ -112,10 +113,12 @@ func StoreGraphMessage(db *gorm.DB, domain string, gm *GraphMessage) (*models.Me
 // configured domain.
 func findGraphRecipient(gm *GraphMessage, domain string) string {
 	suffix := "@" + strings.ToLower(domain)
-	for _, r := range gm.ToRecipients {
-		addr := strings.ToLower(strings.TrimSpace(r.EmailAddress.Address))
-		if strings.HasSuffix(addr, suffix) {
-			return addr
+	for _, list := range [][]graphRecip{gm.ToRecipients, gm.CcRecipients} {
+		for _, r := range list {
+			addr := strings.ToLower(strings.TrimSpace(r.EmailAddress.Address))
+			if strings.HasSuffix(addr, suffix) {
+				return addr
+			}
 		}
 	}
 	return ""

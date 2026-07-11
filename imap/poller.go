@@ -13,6 +13,7 @@ import (
 	"time"
 
 	imaplib "github.com/emersion/go-imap"
+	idle "github.com/emersion/go-imap-idle"
 	"github.com/emersion/go-imap/client"
 	"gorm.io/gorm"
 	"tempmail/handlers"
@@ -20,6 +21,13 @@ import (
 
 // Poller periodically connects to an IMAP server, fetches unread messages, and
 // stores them. It marks fetched messages as \Seen so they are not re-fetched.
+//
+// Speed-oriented behaviour:
+//   - keeps one TCP/TLS session open and reuses it across polls
+//   - drains unread mail immediately after a hit (no wait for next interval)
+//   - uses IMAP IDLE when the server supports it, so new mail wakes the poller
+//     without waiting for the full poll interval
+//   - otherwise uses adaptive backoff between empty polls
 type Poller struct {
 	DB       *gorm.DB
 	Domain   string
@@ -29,7 +37,7 @@ type Poller struct {
 	Password string
 	Mailbox  string        // INBOX by default
 	UseTLS   bool          // true = DialTLS, false = plain (NOT recommended)
-	Interval time.Duration // how often to poll; defaults to 60s
+	Interval time.Duration // base poll interval when IDLE is unavailable; defaults to 15s
 
 	// Outlook OAuth2 / XOAUTH2
 	AuthMode     string // plain | oauth2
@@ -45,73 +53,238 @@ type Poller struct {
 	OnRotated func(newRefreshToken string)
 
 	// token cache so we don't exchange (and rotate) on every poll cycle.
-	mu            sync.Mutex
-	accessToken   string
-	tokenExpiry   time.Time
+	mu          sync.Mutex
+	accessToken string
+	tokenExpiry time.Time
+
+	// shared HTTP client for OAuth token exchange
+	httpClient *http.Client
 }
 
-// Run blocks until stop is closed, polling the IMAP server at each tick.
+// Run blocks until stop is closed.
 func (p *Poller) Run(stop <-chan struct{}) {
-	interval := p.Interval
-	if interval <= 0 {
-		interval = 60 * time.Second
+	base := p.Interval
+	if base <= 0 {
+		base = 15 * time.Second
 	}
-	// Poll once immediately on startup so you don't wait a full interval.
-	p.pollOnce()
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
+	if p.Mailbox == "" {
+		p.Mailbox = "INBOX"
+	}
+	if p.httpClient == nil {
+		p.httpClient = &http.Client{Timeout: 20 * time.Second}
+	}
+
+	// Adaptive empty-poll backoff: base → 2x → … up to 4x base (capped at 2m).
+	emptyBackoff := base
+	maxBackoff := base * 4
+	if maxBackoff > 2*time.Minute {
+		maxBackoff = 2 * time.Minute
+	}
+	if maxBackoff < base {
+		maxBackoff = base
+	}
+
+	var c *client.Client
+	defer func() {
+		if c != nil {
+			_ = c.Logout()
+		}
+	}()
+
+	reconnect := func() error {
+		if c != nil {
+			_ = c.Logout()
+			c = nil
+		}
+		nc, err := p.connect()
+		if err != nil {
+			return err
+		}
+		c = nc
+		if _, err := c.Select(p.Mailbox, false); err != nil {
+			_ = c.Logout()
+			c = nil
+			return fmt.Errorf("select %q: %w", p.Mailbox, err)
+		}
+		return nil
+	}
+
+	// Connect immediately so the first poll does not wait a full interval.
+	if err := reconnect(); err != nil {
+		log.Printf("imap connect: %v", err)
+	}
+
 	for {
+		// Honour stop before doing work.
 		select {
-		case <-ticker.C:
-			p.pollOnce()
 		case <-stop:
 			return
+		default:
+		}
+
+		if c == nil {
+			if err := reconnect(); err != nil {
+				log.Printf("imap connect: %v", err)
+				if !sleepOrStop(stop, emptyBackoff) {
+					return
+				}
+				if emptyBackoff < maxBackoff {
+					emptyBackoff *= 2
+					if emptyBackoff > maxBackoff {
+						emptyBackoff = maxBackoff
+					}
+				}
+				continue
+			}
+		}
+
+		fetched, err := p.fetchUnread(c)
+		if err != nil {
+			log.Printf("imap poll: %v", err)
+			// Drop the session and reconnect next loop.
+			_ = c.Logout()
+			c = nil
+			if !sleepOrStop(stop, emptyBackoff) {
+				return
+			}
+			continue
+		}
+
+		if fetched > 0 {
+			// Drain backlog immediately; do not wait for the next interval.
+			emptyBackoff = base
+			continue
+		}
+
+		// No new mail. Prefer IDLE (near-instant wake-up); fall back to sleep.
+		if supportsIDLE(c) {
+			if err := p.idleWait(c, stop, 25*time.Minute); err != nil {
+				if errors.Is(err, errStopped) {
+					return
+				}
+				// IDLE failure is usually a dropped connection.
+				log.Printf("imap idle: %v", err)
+				_ = c.Logout()
+				c = nil
+				if !sleepOrStop(stop, base) {
+					return
+				}
+			}
+			// On IDLE wake-up (new mail or timeout), loop and fetch.
+			emptyBackoff = base
+			continue
+		}
+
+		if !sleepOrStop(stop, emptyBackoff) {
+			return
+		}
+		if emptyBackoff < maxBackoff {
+			next := emptyBackoff * 2
+			if next > maxBackoff {
+				next = maxBackoff
+			}
+			emptyBackoff = next
 		}
 	}
 }
 
-func (p *Poller) pollOnce() {
-	c, err := p.connect()
-	if err != nil {
-		log.Printf("imap connect: %v", err)
-		return
+func sleepOrStop(stop <-chan struct{}, d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-stop:
+		return false
+	case <-t.C:
+		return true
 	}
-	defer func() {
-		_ = c.Logout()
+}
+
+func supportsIDLE(c *client.Client) bool {
+	if c == nil {
+		return false
+	}
+	caps, err := c.Capability()
+	if err != nil {
+		return false
+	}
+	return caps["IDLE"]
+}
+
+// idleWait blocks until the server signals a mailbox change, stop is closed,
+// or maxWait elapses (servers typically drop IDLE after ~30 minutes).
+func (p *Poller) idleWait(c *client.Client, stop <-chan struct{}, maxWait time.Duration) error {
+	updates := make(chan client.Update, 8)
+	c.Updates = updates
+	defer func() { c.Updates = nil }()
+
+	idleClient := idle.NewClient(c)
+	done := make(chan error, 1)
+	idleStop := make(chan struct{})
+
+	go func() {
+		// IdleWithFallback falls back to NOOP polling if IDLE is unavailable.
+		done <- idleClient.IdleWithFallback(idleStop, 0)
 	}()
 
-	mbox, err := c.Select(p.Mailbox, false)
-	if err != nil {
-		log.Printf("imap select %q: %v", p.Mailbox, err)
-		return
+	timer := time.NewTimer(maxWait)
+	defer timer.Stop()
+
+	var idleErr error
+	select {
+	case <-stop:
+		close(idleStop)
+		<-done
+		return errStopped
+	case <-timer.C:
+		close(idleStop)
+		idleErr = <-done
+		return idleErr
+	case update := <-updates:
+		// Any EXISTS/RECENT/EXPUNGE-style update means we should re-fetch.
+		_ = update
+		close(idleStop)
+		idleErr = <-done
+		// Drain remaining updates so the channel does not block the library.
+		for {
+			select {
+			case <-updates:
+			default:
+				return idleErr
+			}
+		}
+	case idleErr = <-done:
+		return idleErr
 	}
-	if mbox.Messages == 0 {
-		return
+}
+
+var errStopped = errors.New("stopped")
+
+// fetchUnread searches UNSEEN, stores each message, and marks them \Seen.
+// Returns the number of messages fetched from the server (including skipped).
+func (p *Poller) fetchUnread(c *client.Client) (int, error) {
+	// Re-select to refresh EXISTS/RECENT after IDLE.
+	if _, err := c.Select(p.Mailbox, false); err != nil {
+		return 0, fmt.Errorf("select %q: %w", p.Mailbox, err)
 	}
 
-	// Search for unread messages. Using \Seen as the high-water mark keeps
-	// restarts safe: anything already read by an earlier run is skipped.
 	criteria := imaplib.NewSearchCriteria()
 	criteria.WithoutFlags = []string{imaplib.SeenFlag}
 	ids, err := c.Search(criteria)
 	if err != nil {
-		log.Printf("imap search: %v", err)
-		return
+		return 0, fmt.Errorf("search: %w", err)
 	}
 	if len(ids) == 0 {
-		return
+		return 0, nil
 	}
 
 	seqset := new(imaplib.SeqSet)
 	seqset.AddNum(ids...)
 
-	// Fetch the full RFC822 body for each matched message.
 	section, _ := imaplib.ParseBodySectionName("RFC822")
-	ch := make(chan *imaplib.Message, len(ids))
+	ch := make(chan *imaplib.Message, 16)
+	done := make(chan error, 1)
 	go func() {
-		if err := c.Fetch(seqset, []imaplib.FetchItem{section.FetchItem()}, ch); err != nil {
-			log.Printf("imap fetch: %v", err)
-		}
+		done <- c.Fetch(seqset, []imaplib.FetchItem{section.FetchItem()}, ch)
 	}()
 
 	var stored, skipped int
@@ -120,6 +293,7 @@ func (p *Poller) pollOnce() {
 		r := msg.GetBody(section)
 		if r == nil {
 			skipped++
+			toMarkSeen = append(toMarkSeen, msg.SeqNum)
 			continue
 		}
 		raw, err := io.ReadAll(r)
@@ -130,8 +304,7 @@ func (p *Poller) pollOnce() {
 		}
 		if _, err := handlers.StoreMessage(p.DB, p.Domain, string(raw)); err != nil {
 			if errors.Is(err, handlers.ErrNotForOurDomain) {
-				// Forwarded mail not for our domain — still mark read so we
-				// don't loop on it forever.
+				// not for us — still mark seen so we never loop on it
 			} else {
 				log.Printf("store message: %v", err)
 			}
@@ -141,8 +314,10 @@ func (p *Poller) pollOnce() {
 		}
 		toMarkSeen = append(toMarkSeen, msg.SeqNum)
 	}
+	if err := <-done; err != nil {
+		return len(ids), fmt.Errorf("fetch: %w", err)
+	}
 
-	// Mark everything we pulled as \Seen so it won't be re-fetched next cycle.
 	if len(toMarkSeen) > 0 {
 		flagSet := new(imaplib.SeqSet)
 		flagSet.AddNum(toMarkSeen...)
@@ -151,6 +326,7 @@ func (p *Poller) pollOnce() {
 		}
 	}
 	log.Printf("imap poll: fetched %d, stored %d, skipped %d", len(ids), stored, skipped)
+	return len(ids), nil
 }
 
 func (p *Poller) connect() (*client.Client, error) {
@@ -165,6 +341,9 @@ func (p *Poller) connect() (*client.Client, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	// Slightly tighter I/O deadline defaults help detect half-open sockets.
+	c.Timeout = 60 * time.Second
 
 	if p.AuthMode == "oauth2" {
 		token, err := p.fetchAccessToken()
@@ -216,7 +395,11 @@ func (p *Poller) fetchAccessToken() (string, error) {
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
-	resp, err := http.DefaultClient.Do(req)
+	hc := p.httpClient
+	if hc == nil {
+		hc = http.DefaultClient
+	}
+	resp, err := hc.Do(req)
 	if err != nil {
 		return "", err
 	}

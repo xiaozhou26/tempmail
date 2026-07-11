@@ -32,14 +32,14 @@ type IMAPConfig struct {
 // GraphConfig uses the Microsoft Graph API to read mail from the relay inbox
 // instead of IMAP. More reliable than IMAP OAuth2 for personal Outlook accounts.
 type GraphConfig struct {
-	Enabled       bool
-	ClientID      string
-	ClientSecret  string
-	TenantID      string // common | consumers | <tenant-id>
-	RefreshToken  string
-	TokenScope    string // defaults to https://graph.microsoft.com/.default
-	Account       string // relay inbox address, used as the XOAUTH2-style "user" / mailbox owner
-	MailFolder    string // folder to read; empty = default inbox
+	Enabled         bool
+	ClientID        string
+	ClientSecret    string
+	TenantID        string // common | consumers | <tenant-id>
+	RefreshToken    string
+	TokenScope      string // defaults to https://graph.microsoft.com/.default
+	Account         string // relay inbox address, used as the XOAUTH2-style "user" / mailbox owner
+	MailFolder      string // folder to read; empty = default inbox
 	PollIntervalSec int
 }
 
@@ -113,7 +113,7 @@ func Load() (*Config, error) {
 			Password:        get("IMAP_PASS", ""),
 			Mailbox:         get("IMAP_MAILBOX", "INBOX"),
 			UseTLS:          getBool("IMAP_TLS", true),
-			PollIntervalSec: 60,
+			PollIntervalSec: 15,
 			AuthMode:        get("IMAP_AUTH_MODE", "plain"),
 			ClientID:        get("IMAP_CLIENT_ID", ""),
 			TenantID:        get("IMAP_TENANT_ID", "consumers"),
@@ -129,7 +129,7 @@ func Load() (*Config, error) {
 			TokenScope:      get("GRAPH_TOKEN_SCOPE", ""),
 			Account:         get("GRAPH_ACCOUNT", ""),
 			MailFolder:      get("GRAPH_MAIL_FOLDER", ""),
-			PollIntervalSec: 60,
+			PollIntervalSec: 10,
 		},
 	}
 

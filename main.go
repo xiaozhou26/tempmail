@@ -66,7 +66,31 @@ func main() {
 	// Background tasks: expired-mailbox cleanup + IMAP/Graph polling.
 	stop := make(chan struct{})
 	go runCleanup(emailH, cfg.CleanupIntervalMin, stop)
-	if cfg.IMAP.Host != "" {
+	// Graph takes priority over IMAP when enabled (matches README / config.Load).
+	if cfg.Graph.Enabled {
+		gpoller := &graphpoll.Poller{
+			DB:           db,
+			Domain:       cfg.Domain,
+			ClientID:     cfg.Graph.ClientID,
+			ClientSecret: cfg.Graph.ClientSecret,
+			TenantID:     cfg.Graph.TenantID,
+			RefreshToken: cfg.Graph.RefreshToken,
+			TokenScope:   cfg.Graph.TokenScope,
+			Account:      cfg.Graph.Account,
+			MailFolder:   cfg.Graph.MailFolder,
+			Interval:     time.Duration(cfg.Graph.PollIntervalSec) * time.Second,
+			OnRotated: func(newRefreshToken string) {
+				if err := config.PersistRefreshToken(".env", "GRAPH_REFRESH_TOKEN", newRefreshToken); err != nil {
+					log.Printf("persist graph refresh token: %v", err)
+				} else {
+					log.Printf("graph refresh token rotated and saved to .env")
+				}
+			},
+		}
+		go gpoller.Run(stop)
+		log.Printf("graph poller started: %s every %ds (adaptive)",
+			cfg.Graph.Account, cfg.Graph.PollIntervalSec)
+	} else if cfg.IMAP.Host != "" {
 		poller := &imappoll.Poller{
 			DB:       db,
 			Domain:   cfg.Domain,
@@ -94,33 +118,10 @@ func main() {
 			},
 		}
 		go poller.Run(stop)
-		log.Printf("imap poller started: %s@%s:%d every %ds",
+		log.Printf("imap poller started: %s@%s:%d every %ds (IDLE when supported)",
 			cfg.IMAP.Username, cfg.IMAP.Host, cfg.IMAP.Port, cfg.IMAP.PollIntervalSec)
-	} else if cfg.Graph.Enabled {
-		gpoller := &graphpoll.Poller{
-			DB:           db,
-			Domain:       cfg.Domain,
-			ClientID:     cfg.Graph.ClientID,
-			ClientSecret: cfg.Graph.ClientSecret,
-			TenantID:     cfg.Graph.TenantID,
-			RefreshToken: cfg.Graph.RefreshToken,
-			TokenScope:   cfg.Graph.TokenScope,
-			Account:      cfg.Graph.Account,
-			MailFolder:   cfg.Graph.MailFolder,
-			Interval:     time.Duration(cfg.Graph.PollIntervalSec) * time.Second,
-			OnRotated: func(newRefreshToken string) {
-				if err := config.PersistRefreshToken(".env", "GRAPH_REFRESH_TOKEN", newRefreshToken); err != nil {
-					log.Printf("persist graph refresh token: %v", err)
-				} else {
-					log.Printf("graph refresh token rotated and saved to .env")
-				}
-			},
-		}
-		go gpoller.Run(stop)
-		log.Printf("graph poller started: %s every %ds",
-			cfg.Graph.Account, cfg.Graph.PollIntervalSec)
 	} else {
-		log.Printf("WARNING: IMAP not configured; running in webhook-only mode")
+		log.Printf("WARNING: no Graph/IMAP configured; running in webhook-only mode")
 	}
 
 	go func() {

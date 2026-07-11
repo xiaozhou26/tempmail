@@ -2,6 +2,7 @@
 // Microsoft 365 / Outlook.com inbox via the Microsoft Graph API instead of
 // IMAP. It is more reliable than IMAP OAuth2 for personal Outlook accounts,
 // which often return "User is authenticated but not connected" on IMAP XOAUTH2.
+
 package graphpoll
 
 import (
@@ -19,6 +20,12 @@ import (
 )
 
 // Poller periodically reads new messages from the relay inbox via Graph.
+//
+// Speed-oriented behaviour:
+//   - adaptive interval: short after a hit, backs off when the inbox is quiet
+//   - dedicated HTTP client with timeouts (no DefaultClient stalls)
+//   - reuses access tokens until near expiry
+//   - drains a page of new mail and immediately re-polls when the page was full
 type Poller struct {
 	DB *gorm.DB
 	// Domain used to route a message to the right temporary mailbox.
@@ -32,6 +39,7 @@ type Poller struct {
 	Account      string // relay inbox address
 	MailFolder   string // folder name; empty = default inbox
 
+	// Interval is the base (minimum) poll period. Defaults to 10s.
 	Interval time.Duration
 
 	// MSA rotates the refresh token on every exchange; OnRotated lets the
@@ -42,72 +50,114 @@ type Poller struct {
 	accessToken string
 	tokenExpiry time.Time
 	since       time.Time // high-water mark for incremental fetch
+
+	httpClient *http.Client
 }
 
 const (
-	defaultTokenURL = "https://login.microsoftonline.com/common/oauth2/v2.0/token"
-	defaultScope    = "https://graph.microsoft.com/.default offline_access"
-	graphBase      = "https://graph.microsoft.com/v1.0/me/messages"
+	defaultScope = "https://graph.microsoft.com/.default offline_access"
+	graphBase    = "https://graph.microsoft.com/v1.0/me/messages"
+	pageSize     = 50
 )
 
-// Run blocks until stop is closed, polling at each tick.
+// Run blocks until stop is closed, polling at an adaptive interval.
 func (p *Poller) Run(stop <-chan struct{}) {
-	interval := p.Interval
-	if interval <= 0 {
-		interval = 60 * time.Second
+	base := p.Interval
+	if base <= 0 {
+		base = 10 * time.Second
 	}
+	// Cap quiet-time backoff so mail is never more than ~1 minute late by default.
+	maxBackoff := base * 4
+	if maxBackoff > time.Minute {
+		maxBackoff = time.Minute
+	}
+	if maxBackoff < base {
+		maxBackoff = base
+	}
+	if p.httpClient == nil {
+		p.httpClient = &http.Client{Timeout: 30 * time.Second}
+	}
+
 	// Start the high-water mark a little in the past so the first poll also
 	// picks up very recently arrived mail, then advance it as we read.
 	if p.since.IsZero() {
 		p.since = time.Now().Add(-2 * time.Minute)
 	}
-	p.pollOnce()
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
+
+	backoff := base
+	// Poll once immediately on startup so you don't wait a full interval.
 	for {
+		hit, fullPage := p.pollOnce()
+		if hit {
+			backoff = base
+			// Page was full — more mail may be waiting; drain without sleeping.
+			if fullPage {
+				select {
+				case <-stop:
+					return
+				default:
+					continue
+				}
+			}
+		} else if backoff < maxBackoff {
+			next := backoff * 2
+			if next > maxBackoff {
+				next = maxBackoff
+			}
+			backoff = next
+		}
+
+		t := time.NewTimer(backoff)
 		select {
-		case <-ticker.C:
-			p.pollOnce()
 		case <-stop:
+			t.Stop()
 			return
+		case <-t.C:
 		}
 	}
 }
 
-func (p *Poller) pollOnce() {
+// pollOnce returns (hadWork, fullPage).
+// hadWork is true when any message was returned by Graph (stored or skipped).
+// fullPage is true when the response filled the page size (likely more to fetch).
+func (p *Poller) pollOnce() (hadWork bool, fullPage bool) {
 	token, err := p.fetchAccessToken()
 	if err != nil {
 		log.Printf("graph token: %v", err)
-		return
+		return false, false
 	}
 
 	// Incremental fetch: only messages received after the high-water mark.
+	// Use gt (not ge) after advancing since by 1s so we never re-fetch the last
+	// message as a full page of duplicates.
 	since := p.since.UTC().Format(time.RFC3339)
 	q := url.Values{}
-	q.Set("$top", "50")
-	q.Set("$orderby", "receivedDateTime DESC")
+	q.Set("$top", fmt.Sprintf("%d", pageSize))
+	q.Set("$orderby", "receivedDateTime asc")
 	q.Set("$filter", fmt.Sprintf("receivedDateTime ge %s", since))
-	q.Set("$select", "id,subject,from,toRecipients,body,receivedDateTime,internetMessageId")
+	q.Set("$select", "id,subject,from,toRecipients,ccRecipients,body,receivedDateTime,internetMessageId")
 	endpoint := graphBase + "?" + q.Encode()
 
 	req, err := http.NewRequest("GET", endpoint, nil)
 	if err != nil {
 		log.Printf("graph request: %v", err)
-		return
+		return false, false
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
+	// Prefer allows advanced filters; also keep latency-friendly defaults.
 	req.Header.Set("ConsistencyLevel", "eventual")
+	req.Header.Set("Prefer", `outlook.body-content-type="text"`)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := p.httpClient.Do(req)
 	if err != nil {
 		log.Printf("graph fetch: %v", err)
-		return
+		return false, false
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<20)) // 8 MiB cap
 	if resp.StatusCode != 200 {
 		log.Printf("graph fetch %d: %s", resp.StatusCode, string(body))
-		return
+		return false, false
 	}
 
 	var result struct {
@@ -115,14 +165,16 @@ func (p *Poller) pollOnce() {
 	}
 	if err := json.Unmarshal(body, &result); err != nil {
 		log.Printf("graph decode: %v", err)
-		return
+		return false, false
+	}
+	if len(result.Value) == 0 {
+		return false, false
 	}
 
 	var stored, skipped int
 	var latest time.Time
-	// result is DESC by receivedDateTime; iterate oldest-first so the
-	// high-water mark ends up at the newest message.
-	for i := len(result.Value) - 1; i >= 0; i-- {
+	// ASC order: walk forward so the high-water mark ends at the newest message.
+	for i := range result.Value {
 		gm := &result.Value[i]
 		msg, err := handlers.StoreGraphMessage(p.DB, p.Domain, gm)
 		if err != nil {
@@ -132,9 +184,7 @@ func (p *Poller) pollOnce() {
 				log.Printf("graph store: %v", err)
 				skipped++
 			}
-			continue
-		}
-		if msg != nil {
+		} else if msg != nil {
 			stored++
 		} else {
 			skipped++ // duplicate graph id
@@ -143,10 +193,20 @@ func (p *Poller) pollOnce() {
 			latest = t
 		}
 	}
+	full := len(result.Value) >= pageSize
 	if !latest.IsZero() {
-		p.since = latest.Add(time.Second)
+		// Graph timestamps are second-precision. Keep since at latest on a full
+		// page so same-second overflow is not skipped; GraphID dedup handles
+		// re-reads. Step past the second when the page is partial.
+		if full {
+			p.since = latest
+		} else {
+			p.since = latest.Add(time.Second)
+		}
 	}
 	log.Printf("graph poll: fetched %d, stored %d, skipped %d", len(result.Value), stored, skipped)
+	// Pure-duplicate / not-for-us pages count as idle so adaptive backoff grows.
+	return stored > 0 || full, full
 }
 
 func (p *Poller) fetchAccessToken() (string, error) {
@@ -176,12 +236,16 @@ func (p *Poller) fetchAccessToken() (string, error) {
 		form.Set("client_secret", p.ClientSecret)
 	}
 
-	resp, err := http.PostForm(tokenURL, form)
+	hc := p.httpClient
+	if hc == nil {
+		hc = &http.Client{Timeout: 20 * time.Second}
+	}
+	resp, err := hc.PostForm(tokenURL, form)
 	if err != nil {
 		return "", err
 	}
 	defer resp.Body.Close()
-	b, _ := io.ReadAll(resp.Body)
+	b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode != 200 {
 		return "", fmt.Errorf("token endpoint %d: %s", resp.StatusCode, string(b))
 	}

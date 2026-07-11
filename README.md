@@ -153,6 +153,24 @@ curl -H "X-API-Key: $API_KEY" \
   https://api.yourdomain.com/api/mailboxes/alice@yourdomain.com/messages
 ```
 
+## 收信延迟（速度）
+
+默认已针对「尽快看到验证码邮件」做了优化：
+
+| 模式 | 默认间隔 | 加速手段 |
+|------|----------|----------|
+| **Graph** | 10s 起 | 有新邮件时保持短间隔；整页 50 封时立即连拉；空闲时退避到最多 60s |
+| **IMAP** | 15s 起 | **连接复用**（不每次 TLS 握手）；支持 **IMAP IDLE** 时服务器推送唤醒（秒级）；有未读时立即排空；空闲退避 |
+
+可在 `.env` 调更激进（注意邮箱提供商限流）：
+
+```env
+GRAPH_POLL_INTERVAL_SEC=5
+IMAP_POLL_INTERVAL_SEC=5
+```
+
+> Cloudflare Email Routing 本身的转发延迟通常是主要下限（数秒到数十秒），poller 只能优化「转发到中转邮箱之后」这一段。
+
 ## 收信模式
 
 ### Graph 模式（推荐，个人 Outlook 账号）
@@ -213,14 +231,14 @@ IMAP_TOKEN_SCOPE=https://outlook.office.com/IMAP.AccessAsUser.All offline_access
 | `GRAPH_ACCOUNT` | 中转邮箱地址 | （Graph 模式必填） |
 | `GRAPH_REFRESH_TOKEN` | Graph refresh token | （Graph 模式必填） |
 | `GRAPH_TOKEN_SCOPE` | Graph scope | `https://graph.microsoft.com/.default` |
-| `GRAPH_POLL_INTERVAL_SEC` | Graph 轮询间隔（秒） | `60` |
+| `GRAPH_POLL_INTERVAL_SEC` | Graph 基础轮询间隔（秒，有自适应退避） | `10` |
 | `IMAP_HOST` | 中转邮箱 IMAP 主机 | （IMAP 模式必填） |
 | `IMAP_PORT` | IMAP 端口 | `993` |
 | `IMAP_USER` | 中转邮箱账号 | （IMAP 模式必填） |
 | `IMAP_PASS` | 中转邮箱密码/应用专用密码 | （plain 模式必填） |
 | `IMAP_MAILBOX` | 拉取的邮箱文件夹 | `INBOX` |
 | `IMAP_TLS` | 是否使用 TLS | `true` |
-| `IMAP_POLL_INTERVAL_SEC` | 轮询间隔（秒） | `60` |
+| `IMAP_POLL_INTERVAL_SEC` | IMAP 基础轮询间隔（秒；支持 IDLE 时近实时） | `15` |
 | `IMAP_AUTH_MODE` | `plain` 或 `oauth2` | `plain` |
 | `WEBHOOK_SECRET` | 可选 webhook 共享密钥 | （留空=禁用） |
 | `LISTEN_ADDR` | 监听地址 | `:8080` |
