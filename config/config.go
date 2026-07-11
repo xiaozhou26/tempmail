@@ -113,7 +113,7 @@ func Load() (*Config, error) {
 			Password:        get("IMAP_PASS", ""),
 			Mailbox:         get("IMAP_MAILBOX", "INBOX"),
 			UseTLS:          getBool("IMAP_TLS", true),
-			PollIntervalSec: 15,
+			PollIntervalSec: 1,
 			AuthMode:        get("IMAP_AUTH_MODE", "plain"),
 			ClientID:        get("IMAP_CLIENT_ID", ""),
 			TenantID:        get("IMAP_TENANT_ID", "consumers"),
@@ -129,7 +129,7 @@ func Load() (*Config, error) {
 			TokenScope:      get("GRAPH_TOKEN_SCOPE", ""),
 			Account:         get("GRAPH_ACCOUNT", ""),
 			MailFolder:      get("GRAPH_MAIL_FOLDER", ""),
-			PollIntervalSec: 10,
+			PollIntervalSec: 1,
 		},
 	}
 

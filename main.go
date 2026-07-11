@@ -88,7 +88,7 @@ func main() {
 			},
 		}
 		go gpoller.Run(stop)
-		log.Printf("graph poller started: %s every %ds (adaptive)",
+		log.Printf("graph poller started: %s every %ds",
 			cfg.Graph.Account, cfg.Graph.PollIntervalSec)
 	} else if cfg.IMAP.Host != "" {
 		poller := &imappoll.Poller{

@@ -22,7 +22,7 @@ import (
 // Poller periodically reads new messages from the relay inbox via Graph.
 //
 // Speed-oriented behaviour:
-//   - adaptive interval: short after a hit, backs off when the inbox is quiet
+//   - fixed poll interval (default 1s)
 //   - dedicated HTTP client with timeouts (no DefaultClient stalls)
 //   - reuses access tokens until near expiry
 //   - drains a page of new mail and immediately re-polls when the page was full
@@ -39,7 +39,7 @@ type Poller struct {
 	Account      string // relay inbox address
 	MailFolder   string // folder name; empty = default inbox
 
-	// Interval is the base (minimum) poll period. Defaults to 10s.
+	// Interval is the poll period. Defaults to 1s.
 	Interval time.Duration
 
 	// MSA rotates the refresh token on every exchange; OnRotated lets the
@@ -60,19 +60,11 @@ const (
 	pageSize     = 50
 )
 
-// Run blocks until stop is closed, polling at an adaptive interval.
+// Run blocks until stop is closed, polling once per Interval (default 1s).
 func (p *Poller) Run(stop <-chan struct{}) {
 	base := p.Interval
 	if base <= 0 {
-		base = 10 * time.Second
-	}
-	// Cap quiet-time backoff so mail is never more than ~1 minute late by default.
-	maxBackoff := base * 4
-	if maxBackoff > time.Minute {
-		maxBackoff = time.Minute
-	}
-	if maxBackoff < base {
-		maxBackoff = base
+		base = time.Second
 	}
 	if p.httpClient == nil {
 		p.httpClient = &http.Client{Timeout: 30 * time.Second}
@@ -84,30 +76,20 @@ func (p *Poller) Run(stop <-chan struct{}) {
 		p.since = time.Now().Add(-2 * time.Minute)
 	}
 
-	backoff := base
 	// Poll once immediately on startup so you don't wait a full interval.
 	for {
-		hit, fullPage := p.pollOnce()
-		if hit {
-			backoff = base
-			// Page was full — more mail may be waiting; drain without sleeping.
-			if fullPage {
-				select {
-				case <-stop:
-					return
-				default:
-					continue
-				}
+		_, fullPage := p.pollOnce()
+		// Page was full — more mail may be waiting; drain without sleeping.
+		if fullPage {
+			select {
+			case <-stop:
+				return
+			default:
+				continue
 			}
-		} else if backoff < maxBackoff {
-			next := backoff * 2
-			if next > maxBackoff {
-				next = maxBackoff
-			}
-			backoff = next
 		}
 
-		t := time.NewTimer(backoff)
+		t := time.NewTimer(base)
 		select {
 		case <-stop:
 			t.Stop()
@@ -205,7 +187,6 @@ func (p *Poller) pollOnce() (hadWork bool, fullPage bool) {
 		}
 	}
 	log.Printf("graph poll: fetched %d, stored %d, skipped %d", len(result.Value), stored, skipped)
-	// Pure-duplicate / not-for-us pages count as idle so adaptive backoff grows.
 	return stored > 0 || full, full
 }
 

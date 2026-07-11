@@ -27,7 +27,7 @@ import (
 //   - drains unread mail immediately after a hit (no wait for next interval)
 //   - uses IMAP IDLE when the server supports it, so new mail wakes the poller
 //     without waiting for the full poll interval
-//   - otherwise uses adaptive backoff between empty polls
+//   - otherwise polls every Interval (default 1s)
 type Poller struct {
 	DB       *gorm.DB
 	Domain   string
@@ -37,7 +37,7 @@ type Poller struct {
 	Password string
 	Mailbox  string        // INBOX by default
 	UseTLS   bool          // true = DialTLS, false = plain (NOT recommended)
-	Interval time.Duration // base poll interval when IDLE is unavailable; defaults to 15s
+	Interval time.Duration // poll interval when IDLE is unavailable; defaults to 1s
 
 	// Outlook OAuth2 / XOAUTH2
 	AuthMode     string // plain | oauth2
@@ -65,23 +65,13 @@ type Poller struct {
 func (p *Poller) Run(stop <-chan struct{}) {
 	base := p.Interval
 	if base <= 0 {
-		base = 15 * time.Second
+		base = time.Second
 	}
 	if p.Mailbox == "" {
 		p.Mailbox = "INBOX"
 	}
 	if p.httpClient == nil {
 		p.httpClient = &http.Client{Timeout: 20 * time.Second}
-	}
-
-	// Adaptive empty-poll backoff: base → 2x → … up to 4x base (capped at 2m).
-	emptyBackoff := base
-	maxBackoff := base * 4
-	if maxBackoff > 2*time.Minute {
-		maxBackoff = 2 * time.Minute
-	}
-	if maxBackoff < base {
-		maxBackoff = base
 	}
 
 	var c *client.Client
@@ -125,14 +115,8 @@ func (p *Poller) Run(stop <-chan struct{}) {
 		if c == nil {
 			if err := reconnect(); err != nil {
 				log.Printf("imap connect: %v", err)
-				if !sleepOrStop(stop, emptyBackoff) {
+				if !sleepOrStop(stop, base) {
 					return
-				}
-				if emptyBackoff < maxBackoff {
-					emptyBackoff *= 2
-					if emptyBackoff > maxBackoff {
-						emptyBackoff = maxBackoff
-					}
 				}
 				continue
 			}
@@ -144,7 +128,7 @@ func (p *Poller) Run(stop <-chan struct{}) {
 			// Drop the session and reconnect next loop.
 			_ = c.Logout()
 			c = nil
-			if !sleepOrStop(stop, emptyBackoff) {
+			if !sleepOrStop(stop, base) {
 				return
 			}
 			continue
@@ -152,11 +136,10 @@ func (p *Poller) Run(stop <-chan struct{}) {
 
 		if fetched > 0 {
 			// Drain backlog immediately; do not wait for the next interval.
-			emptyBackoff = base
 			continue
 		}
 
-		// No new mail. Prefer IDLE (near-instant wake-up); fall back to sleep.
+		// No new mail. Prefer IDLE (near-instant wake-up); fall back to 1s sleep.
 		if supportsIDLE(c) {
 			if err := p.idleWait(c, stop, 25*time.Minute); err != nil {
 				if errors.Is(err, errStopped) {
@@ -171,19 +154,11 @@ func (p *Poller) Run(stop <-chan struct{}) {
 				}
 			}
 			// On IDLE wake-up (new mail or timeout), loop and fetch.
-			emptyBackoff = base
 			continue
 		}
 
-		if !sleepOrStop(stop, emptyBackoff) {
+		if !sleepOrStop(stop, base) {
 			return
-		}
-		if emptyBackoff < maxBackoff {
-			next := emptyBackoff * 2
-			if next > maxBackoff {
-				next = maxBackoff
-			}
-			emptyBackoff = next
 		}
 	}
 }
