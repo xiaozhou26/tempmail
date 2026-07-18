@@ -88,7 +88,7 @@ func (h *EmailHandler) ListMailboxes(c *gin.Context) {
 // from the relay inbox so the embedded messages list is fresh.
 func (h *EmailHandler) GetMailbox(c *gin.Context) {
 	if h.Ingest != nil {
-		_ = h.Ingest.Sync()
+		_ = h.Ingest.SyncContext(c.Request.Context())
 	}
 	address := strings.ToLower(c.Param("address"))
 	var mb models.Mailbox

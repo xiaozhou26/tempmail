@@ -6,12 +6,14 @@
 package graphpoll
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -62,7 +64,7 @@ const (
 
 // FetchOnce pulls new mail once (and drains full pages). Safe for concurrent
 // callers only if serialized externally (use ingest.OnDemand).
-func (p *Poller) FetchOnce() error {
+func (p *Poller) FetchOnce(ctx context.Context) error {
 	if p.httpClient == nil {
 		p.httpClient = &http.Client{Timeout: 30 * time.Second}
 	}
@@ -71,7 +73,7 @@ func (p *Poller) FetchOnce() error {
 	}
 	// Drain until a partial page so backlog is cleared in one client request.
 	for {
-		_, full, err := p.pollOnce()
+		_, full, err := p.pollOnce(ctx)
 		if err != nil {
 			return err
 		}
@@ -88,7 +90,7 @@ func (p *Poller) Run(stop <-chan struct{}) {
 		base = time.Second
 	}
 	for {
-		if err := p.FetchOnce(); err != nil {
+		if err := p.FetchOnce(context.Background()); err != nil {
 			log.Printf("graph poll: %v", err)
 		}
 		t := time.NewTimer(base)
@@ -102,8 +104,8 @@ func (p *Poller) Run(stop <-chan struct{}) {
 }
 
 // pollOnce returns (hadWork, fullPage, err).
-func (p *Poller) pollOnce() (hadWork bool, fullPage bool, err error) {
-	token, err := p.fetchAccessToken()
+func (p *Poller) pollOnce(ctx context.Context) (hadWork bool, fullPage bool, err error) {
+	token, err := p.fetchAccessToken(ctx)
 	if err != nil {
 		return false, false, err
 	}
@@ -119,7 +121,7 @@ func (p *Poller) pollOnce() (hadWork bool, fullPage bool, err error) {
 	q.Set("$select", "id,subject,from,toRecipients,ccRecipients,body,receivedDateTime,internetMessageId")
 	endpoint := graphBase + "?" + q.Encode()
 
-	req, err := http.NewRequest("GET", endpoint, nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", endpoint, nil)
 	if err != nil {
 		return false, false, err
 	}
@@ -185,7 +187,7 @@ func (p *Poller) pollOnce() (hadWork bool, fullPage bool, err error) {
 	return stored > 0 || full, full, nil
 }
 
-func (p *Poller) fetchAccessToken() (string, error) {
+func (p *Poller) fetchAccessToken(ctx context.Context) (string, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -216,7 +218,12 @@ func (p *Poller) fetchAccessToken() (string, error) {
 	if hc == nil {
 		hc = &http.Client{Timeout: 20 * time.Second}
 	}
-	resp, err := hc.PostForm(tokenURL, form)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenURL, strings.NewReader(form.Encode()))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	resp, err := hc.Do(req)
 	if err != nil {
 		return "", err
 	}

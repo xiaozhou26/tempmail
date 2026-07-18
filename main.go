@@ -154,6 +154,9 @@ func main() {
 	if err := srv.Shutdown(ctx); err != nil {
 		log.Printf("shutdown: %v", err)
 	}
+	if onDemand != nil {
+		onDemand.Close()
+	}
 }
 
 func runCleanup(h *handlers.EmailHandler, everyMin int, stop <-chan struct{}) {

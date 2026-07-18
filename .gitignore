@@ -5,7 +5,7 @@
 
 # Runtime data
 /data/
-
+.claude/
 # Local config (contains secrets)
 .env
 

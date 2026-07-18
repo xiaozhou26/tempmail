@@ -1,6 +1,7 @@
 package imappoll
 
 import (
+	"context"
 	"crypto/tls"
 	"encoding/json"
 	"errors"
@@ -75,7 +76,7 @@ type Poller struct {
 // The connection is not kept idle between calls: many providers (and local
 // proxies) drop quiet TLS sessions, and go-imap's client Timeout would otherwise
 // log "i/o timeout" ~60s after the last command.
-func (p *Poller) FetchOnce() error {
+func (p *Poller) FetchOnce(ctx context.Context) error {
 	if p.Mailbox == "" {
 		p.Mailbox = "INBOX"
 	}
@@ -92,7 +93,7 @@ func (p *Poller) FetchOnce() error {
 		p.conn = nil
 	}
 
-	c, err := p.connect()
+	c, err := p.connect(ctx)
 	if err != nil {
 		return err
 	}
@@ -142,7 +143,7 @@ func (p *Poller) Run(stop <-chan struct{}) {
 			_ = c.Logout()
 			c = nil
 		}
-		nc, err := p.connect()
+		nc, err := p.connect(context.Background())
 		if err != nil {
 			return err
 		}
@@ -368,7 +369,28 @@ func (p *Poller) tlsConfig() *tls.Config {
 	}
 }
 
-func (p *Poller) connect() (*client.Client, error) {
+type contextDialer struct {
+	ctx  context.Context
+	done <-chan struct{}
+	net.Dialer
+}
+
+func (d *contextDialer) Dial(network, address string) (net.Conn, error) {
+	conn, err := d.DialContext(d.ctx, network, address)
+	if err != nil {
+		return nil, err
+	}
+	go func() {
+		select {
+		case <-d.ctx.Done():
+			_ = conn.Close()
+		case <-d.done:
+		}
+	}()
+	return conn, nil
+}
+
+func (p *Poller) connect(ctx context.Context) (*client.Client, error) {
 	if p.Host == "" {
 		return nil, fmt.Errorf("imap host is empty")
 	}
@@ -382,14 +404,27 @@ func (p *Poller) connect() (*client.Client, error) {
 	}
 	addr := net.JoinHostPort(p.Host, fmt.Sprintf("%d", port))
 
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	dialDone := make(chan struct{})
+	defer close(dialDone)
+	dialer := &contextDialer{
+		ctx:  ctx,
+		done: dialDone,
+		Dialer: net.Dialer{
+			Timeout: 20 * time.Second,
+		},
+	}
+
 	var c *client.Client
 	var err error
 	switch {
 	case p.UseTLS:
 		// Implicit TLS — Firstmail (imap.firstmail.ltd:993), Gmail, most hosts.
-		c, err = client.DialTLS(addr, p.tlsConfig())
+		c, err = client.DialWithDialerTLS(dialer, addr, p.tlsConfig())
 	case p.StartTLS:
-		c, err = client.Dial(addr)
+		c, err = client.DialWithDialer(dialer, addr)
 		if err == nil {
 			if err = c.StartTLS(p.tlsConfig()); err != nil {
 				_ = c.Logout()
@@ -397,7 +432,7 @@ func (p *Poller) connect() (*client.Client, error) {
 			}
 		}
 	default:
-		c, err = client.Dial(addr)
+		c, err = client.DialWithDialer(dialer, addr)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("dial %s: %w", addr, err)
@@ -411,7 +446,7 @@ func (p *Poller) connect() (*client.Client, error) {
 	}
 
 	if mode == "oauth2" {
-		token, err := p.fetchAccessToken()
+		token, err := p.fetchAccessToken(ctx)
 		if err != nil {
 			_ = c.Logout()
 			return nil, fmt.Errorf("oauth2 token: %w", err)
@@ -431,7 +466,7 @@ func (p *Poller) connect() (*client.Client, error) {
 	return c, nil
 }
 
-func (p *Poller) fetchAccessToken() (string, error) {
+func (p *Poller) fetchAccessToken(ctx context.Context) (string, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -455,7 +490,7 @@ func (p *Poller) fetchAccessToken() (string, error) {
 		tenant = "consumers"
 	}
 	tokenURL := fmt.Sprintf("https://login.microsoftonline.com/%s/oauth2/v2.0/token", tenant)
-	req, err := http.NewRequest("POST", tokenURL, strings.NewReader(form.Encode()))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenURL, strings.NewReader(form.Encode()))
 	if err != nil {
 		return "", err
 	}

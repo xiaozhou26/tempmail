@@ -24,9 +24,9 @@ type messageDetail struct {
 	Raw string `json:"raw"`
 }
 
-func (h *MessageHandler) sync() {
+func (h *MessageHandler) sync(c *gin.Context) {
 	if h.Ingest != nil {
-		_ = h.Ingest.Sync()
+		_ = h.Ingest.SyncContext(c.Request.Context())
 	}
 }
 
@@ -36,7 +36,7 @@ func (h *MessageHandler) sync() {
 // When on-demand ingestion is configured, this endpoint first pulls new mail
 // from the relay inbox, then returns whatever is stored for the mailbox.
 func (h *MessageHandler) ListMessages(c *gin.Context) {
-	h.sync()
+	h.sync(c)
 
 	address := strings.ToLower(c.Param("address"))
 	var mb models.Mailbox
@@ -52,7 +52,7 @@ func (h *MessageHandler) ListMessages(c *gin.Context) {
 // GetMessage returns a single message including the raw source.
 // GET /api/messages/:id
 func (h *MessageHandler) GetMessage(c *gin.Context) {
-	h.sync()
+	h.sync(c)
 
 	var msg models.Message
 	if err := h.DB.First(&msg, c.Param("id")).Error; errors.Is(err, gorm.ErrRecordNotFound) {
