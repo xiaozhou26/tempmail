@@ -16,7 +16,8 @@ import (
 
 type EmailHandler struct {
 	DB       *gorm.DB
-	Domain   string
+	Domain   string   // primary domain (default for mailbox creation)
+	Domains  []string // all configured domains
 	TTLHours int
 	Ingest   *ingest.OnDemand // optional; GetMailbox triggers a relay fetch first
 }
@@ -24,6 +25,7 @@ type EmailHandler struct {
 // CreateMailboxRequest is the body for POST /api/mailboxes.
 type CreateMailboxRequest struct {
 	Name     string `json:"name"`      // optional custom local-part; random if empty
+	Domain   string `json:"domain"`    // optional; uses primary domain if empty
 	TTLHours int    `json:"ttl_hours"` // optional override; defaults to server config
 }
 
@@ -32,6 +34,24 @@ type CreateMailboxRequest struct {
 func (h *EmailHandler) CreateMailbox(c *gin.Context) {
 	var req CreateMailboxRequest
 	_ = c.ShouldBindJSON(&req) // body is optional
+
+	// Resolve domain: use requested domain if valid, otherwise primary.
+	domain := h.Domain
+	if req.Domain != "" {
+		reqDomain := strings.ToLower(strings.TrimSpace(req.Domain))
+		found := false
+		for _, d := range h.Domains {
+			if d == reqDomain {
+				found = true
+				break
+			}
+		}
+		if !found {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid domain"})
+			return
+		}
+		domain = reqDomain
+	}
 
 	name := strings.ToLower(strings.TrimSpace(req.Name))
 	if name == "" {
@@ -45,7 +65,7 @@ func (h *EmailHandler) CreateMailbox(c *gin.Context) {
 			return
 		}
 	}
-	address := name + "@" + h.Domain
+	address := name + "@" + domain
 
 	// Avoid collisions on custom names.
 	if req.Name != "" {

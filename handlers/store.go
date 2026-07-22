@@ -16,13 +16,13 @@ import (
 // handler and the IMAP poller call this.
 //
 // It returns the stored message and nil on success.
-func StoreMessage(db *gorm.DB, domain, raw string) (*models.Message, error) {
+func StoreMessage(db *gorm.DB, domains []string, raw string) (*models.Message, error) {
 	env, err := enmime.ReadEnvelope(bytes.NewReader([]byte(raw)))
 	if err != nil {
 		return nil, err
 	}
 
-	to := findRecipient(env, domain)
+	to := findRecipient(env, domains)
 	if to == "" {
 		// Not addressed to anyone on our domain — ignore silently.
 		return nil, ErrNotForOurDomain
@@ -68,22 +68,26 @@ func StoreMessage(db *gorm.DB, domain, raw string) (*models.Message, error) {
 }
 
 // findRecipient inspects To / Delivered-To / X-Forwarded-To / X-Original-To
-// headers (in that order) and returns the first address whose domain matches.
-// Cloudflare Email Routing preserves the original To header, but some
-// providers rewrite it, so the alternate headers are a fallback.
-func findRecipient(env *enmime.Envelope, domain string) string {
+// headers (in that order) and returns the first address whose domain matches
+// any of the configured domains.
+func findRecipient(env *enmime.Envelope, domains []string) string {
 	candidates := []string{
 		env.GetHeader("To"),
 		env.GetHeader("Delivered-To"),
 		env.GetHeader("X-Forwarded-To"),
 		env.GetHeader("X-Original-To"),
 	}
-	suffix := "@" + domain
+	suffixes := make([]string, len(domains))
+	for i, d := range domains {
+		suffixes[i] = "@" + d
+	}
 	for _, h := range candidates {
 		for _, addr := range extractAddresses(h) {
 			addr = strings.ToLower(strings.TrimSpace(addr))
-			if strings.HasSuffix(addr, suffix) {
-				return addr
+			for _, suffix := range suffixes {
+				if strings.HasSuffix(addr, suffix) {
+					return addr
+				}
 			}
 		}
 	}

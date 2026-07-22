@@ -30,8 +30,8 @@ import (
 //   - drains full pages in a single FetchOnce call
 type Poller struct {
 	DB *gorm.DB
-	// Domain used to route a message to the right temporary mailbox.
-	Domain string
+	// Domains used to route a message to the right temporary mailbox.
+	Domains []string
 
 	ClientID     string
 	ClientSecret string
@@ -155,7 +155,7 @@ func (p *Poller) pollOnce(ctx context.Context) (hadWork bool, fullPage bool, err
 	// ASC order: walk forward so the high-water mark ends at the newest message.
 	for i := range result.Value {
 		gm := &result.Value[i]
-		msg, err := handlers.StoreGraphMessage(p.DB, p.Domain, gm)
+		msg, err := handlers.StoreGraphMessage(p.DB, p.Domains, gm)
 		if err != nil {
 			if err == handlers.ErrNotForOurDomain {
 				skipped++

@@ -31,7 +31,7 @@ import (
 //   - Run may use IMAP IDLE when continuously polling
 type Poller struct {
 	DB       *gorm.DB
-	Domain   string
+	Domains  []string
 	Host     string
 	Port     int
 	Username string
@@ -334,7 +334,7 @@ func (p *Poller) fetchUnread(c *client.Client) (int, error) {
 			toMarkSeen = append(toMarkSeen, msg.SeqNum)
 			continue
 		}
-		if _, err := handlers.StoreMessage(p.DB, p.Domain, string(raw)); err != nil {
+		if _, err := handlers.StoreMessage(p.DB, p.Domains, string(raw)); err != nil {
 			if errors.Is(err, handlers.ErrNotForOurDomain) {
 				// not for us — still mark seen so we never loop on it
 			} else {
