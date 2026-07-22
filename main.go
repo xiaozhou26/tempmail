@@ -28,16 +28,16 @@ func main() {
 	if err != nil {
 		log.Fatalf("config: %v", err)
 	}
-	log.Printf("starting tempmail %s for domain %q on %s", version, cfg.Domain, cfg.ListenAddr)
+	log.Printf("starting tempmail %s for domains %v on %s", version, cfg.Domains, cfg.ListenAddr)
 
 	db, err := storage.Open(cfg.DBPath)
 	if err != nil {
 		log.Fatalf("db: %v", err)
 	}
 
-	emailH := &handlers.EmailHandler{DB: db, Domain: cfg.Domain, TTLHours: cfg.DefaultTTLHours}
+	emailH := &handlers.EmailHandler{DB: db, Domain: cfg.Domain, Domains: cfg.Domains, TTLHours: cfg.DefaultTTLHours}
 	msgH := &handlers.MessageHandler{DB: db}
-	webhookH := &handlers.WebhookHandler{DB: db, Domain: cfg.Domain}
+	webhookH := &handlers.WebhookHandler{DB: db, Domains: cfg.Domains}
 
 	// On-demand ingestion: only fetch from Graph/IMAP when a client asks for mail.
 	var onDemand *ingest.OnDemand
@@ -51,7 +51,7 @@ func main() {
 	if cfg.Graph.Enabled {
 		gpoller := &graphpoll.Poller{
 			DB:           db,
-			Domain:       cfg.Domain,
+			Domains:      cfg.Domains,
 			ClientID:     cfg.Graph.ClientID,
 			ClientSecret: cfg.Graph.ClientSecret,
 			TenantID:     cfg.Graph.TenantID,
@@ -77,7 +77,7 @@ func main() {
 	} else if cfg.IMAP.Host != "" {
 		poller := &imappoll.Poller{
 			DB:                 db,
-			Domain:             cfg.Domain,
+			Domains:            cfg.Domains,
 			Host:               cfg.IMAP.Host,
 			Port:               cfg.IMAP.Port,
 			Username:           cfg.IMAP.Username,
@@ -120,7 +120,7 @@ func main() {
 		smtpSrv = &smtpServer.Server{
 			Addr:     cfg.SMTP.Addr,
 			Hostname: cfg.SMTP.Hostname,
-			Domain:   cfg.Domain,
+			Domains:  cfg.Domains,
 			DB:       db,
 		}
 		go func() {
@@ -128,8 +128,8 @@ func main() {
 				log.Printf("smtp server stopped: %v", err)
 			}
 		}()
-		log.Printf("smtp server enabled on %s (hostname=%s, accepts mail for @%s)",
-			cfg.SMTP.Addr, cfg.SMTP.Hostname, cfg.Domain)
+		log.Printf("smtp server enabled on %s (hostname=%s, accepts mail for %v)",
+			cfg.SMTP.Addr, cfg.SMTP.Hostname, cfg.Domains)
 	}
 
 	r := gin.Default()

@@ -16,11 +16,11 @@ import (
 	"tempmail/handlers"
 )
 
-// Server wraps an SMTP server that accepts mail for the configured domain.
+// Server wraps an SMTP server that accepts mail for configured domains.
 type Server struct {
-	Addr     string // listen address, e.g. ":25"
-	Hostname string // server hostname for EHLO/HELO
-	Domain   string // email domain to accept mail for
+	Addr     string   // listen address, e.g. ":25"
+	Hostname string   // server hostname for EHLO/HELO
+	Domains  []string // email domains to accept mail for
 	DB       *gorm.DB
 
 	srv *goSmtp.Server
@@ -29,9 +29,13 @@ type Server struct {
 // Start begins listening for SMTP connections. It blocks until the context is
 // cancelled or an error occurs.
 func (s *Server) Start(ctx context.Context) error {
+	domains := make([]string, len(s.Domains))
+	for i, d := range s.Domains {
+		domains[i] = strings.ToLower(d)
+	}
 	be := &backend{
-		db:     s.DB,
-		domain: strings.ToLower(s.Domain),
+		db:      s.DB,
+		domains: domains,
 	}
 
 	s.srv = goSmtp.NewServer(be)
@@ -49,7 +53,7 @@ func (s *Server) Start(ctx context.Context) error {
 		s.srv.Close()
 	}()
 
-	log.Printf("smtp server listening on %s (hostname=%s, domain=%s)", s.Addr, s.Hostname, s.Domain)
+	log.Printf("smtp server listening on %s (hostname=%s, domains=%v)", s.Addr, s.Hostname, s.Domains)
 	if err := s.srv.ListenAndServe(); err != nil && ctx.Err() == nil {
 		return err
 	}
@@ -58,19 +62,19 @@ func (s *Server) Start(ctx context.Context) error {
 
 // backend implements go-smtp.Backend.
 type backend struct {
-	db     *gorm.DB
-	domain string
+	db      *gorm.DB
+	domains []string
 }
 
 func (b *backend) NewSession(_ *goSmtp.Conn) (goSmtp.Session, error) {
-	return &session{db: b.db, domain: b.domain}, nil
+	return &session{db: b.db, domains: b.domains}, nil
 }
 
 // session implements go-smtp.Session.
 type session struct {
-	db     *gorm.DB
-	domain string
-	from   string
+	db      *gorm.DB
+	domains []string
+	from    string
 }
 
 func (s *session) Mail(from string, _ *goSmtp.MailOptions) error {
@@ -79,15 +83,17 @@ func (s *session) Mail(from string, _ *goSmtp.MailOptions) error {
 }
 
 func (s *session) Rcpt(to string, _ *goSmtp.RcptOptions) error {
-	// Only accept recipients on our domain.
+	// Only accept recipients on our domains.
 	addr := strings.ToLower(strings.TrimSpace(to))
-	if !strings.HasSuffix(addr, "@"+s.domain) {
-		return &goSmtp.SMTPError{
-			Code:    550,
-			Message: "5.1.1 relaying denied",
+	for _, d := range s.domains {
+		if strings.HasSuffix(addr, "@"+d) {
+			return nil
 		}
 	}
-	return nil
+	return &goSmtp.SMTPError{
+		Code:    550,
+		Message: "5.1.1 relaying denied",
+	}
 }
 
 func (s *session) Data(r io.Reader) error {
@@ -96,7 +102,7 @@ func (s *session) Data(r io.Reader) error {
 		return err
 	}
 
-	msg, err := handlers.StoreMessage(s.db, s.domain, string(raw))
+	msg, err := handlers.StoreMessage(s.db, s.domains, string(raw))
 	if err != nil {
 		if err == handlers.ErrNotForOurDomain {
 			// Silently accept — we already validated in Rcpt().

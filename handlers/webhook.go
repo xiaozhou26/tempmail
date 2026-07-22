@@ -14,8 +14,8 @@ import (
 var ErrNotForOurDomain = errors.New("message not addressed to this domain")
 
 type WebhookHandler struct {
-	DB     *gorm.DB
-	Domain string
+	DB      *gorm.DB
+	Domains []string
 }
 
 // WebhookPayload mirrors what a push source (e.g. an Email Worker, should you
@@ -44,7 +44,7 @@ func (h *WebhookHandler) Receive(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "missing 'raw' field"})
 		return
 	}
-	msg, err := StoreMessage(h.DB, h.Domain, p.Raw)
+	msg, err := StoreMessage(h.DB, h.Domains, p.Raw)
 	if err != nil {
 		if errors.Is(err, ErrNotForOurDomain) {
 			c.JSON(http.StatusAccepted, gin.H{"ok": true, "ignored": "not for our domain"})

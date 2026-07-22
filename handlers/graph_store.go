@@ -46,8 +46,8 @@ type graphBody struct {
 //
 // Returns the stored message, or nil with ErrNotForOurDomain when no recipient
 // is on our domain.
-func StoreGraphMessage(db *gorm.DB, domain string, gm *GraphMessage) (*models.Message, error) {
-	to := findGraphRecipient(gm, domain)
+func StoreGraphMessage(db *gorm.DB, domains []string, gm *GraphMessage) (*models.Message, error) {
+	to := findGraphRecipient(gm, domains)
 	if to == "" {
 		return nil, ErrNotForOurDomain
 	}
@@ -109,15 +109,20 @@ func StoreGraphMessage(db *gorm.DB, domain string, gm *GraphMessage) (*models.Me
 	return msg, nil
 }
 
-// findGraphRecipient returns the first To recipient whose address is on the
-// configured domain.
-func findGraphRecipient(gm *GraphMessage, domain string) string {
-	suffix := "@" + strings.ToLower(domain)
+// findGraphRecipient returns the first To recipient whose address is on any of
+// the configured domains.
+func findGraphRecipient(gm *GraphMessage, domains []string) string {
+	suffixes := make([]string, len(domains))
+	for i, d := range domains {
+		suffixes[i] = "@" + strings.ToLower(d)
+	}
 	for _, list := range [][]graphRecip{gm.ToRecipients, gm.CcRecipients} {
 		for _, r := range list {
 			addr := strings.ToLower(strings.TrimSpace(r.EmailAddress.Address))
-			if strings.HasSuffix(addr, suffix) {
-				return addr
+			for _, suffix := range suffixes {
+				if strings.HasSuffix(addr, suffix) {
+					return addr
+				}
 			}
 		}
 	}

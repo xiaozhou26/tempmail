@@ -57,8 +57,10 @@ type SMTPConfig struct {
 
 // Config holds all runtime configuration loaded from the environment.
 type Config struct {
-	// Domain used to build temporary email addresses, e.g. "mail.example.com".
+	// Primary domain (first in the list).
 	Domain string
+	// All configured domains. MAIL_DOMAIN accepts comma-separated values.
+	Domains []string
 	// HTTP listen address.
 	ListenAddr string
 	// Path to the SQLite database file.
@@ -125,8 +127,19 @@ func Load() (*Config, error) {
 		return def
 	}
 
+	// Parse multiple domains from MAIL_DOMAIN (comma-separated).
+	domainRaw := get("MAIL_DOMAIN", "example.com")
+	var domains []string
+	for _, d := range strings.Split(domainRaw, ",") {
+		d := strings.ToLower(strings.TrimPrefix(strings.TrimSpace(d), "@"))
+		if d != "" && d != "example.com" {
+			domains = append(domains, d)
+		}
+	}
+
 	cfg := &Config{
-		Domain:             strings.ToLower(strings.TrimPrefix(strings.TrimSpace(get("MAIL_DOMAIN", "example.com")), "@")),
+		Domain:             "", // set below
+		Domains:            domains,
 		ListenAddr:         get("LISTEN_ADDR", ":8080"),
 		DBPath:             get("DB_PATH", "./data/tempmail.db"),
 		APIKey:             get("API_KEY", ""),
@@ -219,9 +232,10 @@ func Load() (*Config, error) {
 	if cfg.APIKey == "" {
 		return nil, fmt.Errorf("API_KEY is required (set it in .env or environment)")
 	}
-	if cfg.Domain == "" || cfg.Domain == "example.com" {
-		return nil, fmt.Errorf("MAIL_DOMAIN must be set to your real domain")
+	if len(domains) == 0 {
+		return nil, fmt.Errorf("MAIL_DOMAIN must be set to your real domain(s)")
 	}
+	cfg.Domain = domains[0] // primary domain
 
 	// SMTP mode: the built-in SMTP server receives mail directly. IMAP/Graph
 	// are optional (for legacy relay setups or dual-mode operation).
