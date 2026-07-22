@@ -16,6 +16,7 @@ import (
 	imappoll "tempmail/imap"
 	"tempmail/ingest"
 	"tempmail/middleware"
+	smtpServer "tempmail/smtp"
 	"tempmail/storage"
 )
 
@@ -106,11 +107,30 @@ func main() {
 		}
 		log.Printf("imap on-demand fetch ready: %s@%s:%d tls=%v (triggered by GET messages)",
 			cfg.IMAP.Username, cfg.IMAP.Host, cfg.IMAP.Port, cfg.IMAP.UseTLS)
-	} else {
-		log.Printf("WARNING: no Graph/IMAP configured; running in webhook-only mode")
+	} else if !cfg.SMTP.Enabled {
+		log.Printf("WARNING: no SMTP/Graph/IMAP configured; running in webhook-only mode")
 	}
 	emailH.Ingest = onDemand
 	msgH.Ingest = onDemand
+
+	// Built-in SMTP server: directly receives mail for the configured domain.
+	var smtpSrv *smtpServer.Server
+	smtpCtx, smtpCancel := context.WithCancel(context.Background())
+	if cfg.SMTP.Enabled {
+		smtpSrv = &smtpServer.Server{
+			Addr:     cfg.SMTP.Addr,
+			Hostname: cfg.SMTP.Hostname,
+			Domain:   cfg.Domain,
+			DB:       db,
+		}
+		go func() {
+			if err := smtpSrv.Start(smtpCtx); err != nil {
+				log.Printf("smtp server stopped: %v", err)
+			}
+		}()
+		log.Printf("smtp server enabled on %s (hostname=%s, accepts mail for @%s)",
+			cfg.SMTP.Addr, cfg.SMTP.Hostname, cfg.Domain)
+	}
 
 	r := gin.Default()
 	r.GET("/healthz", func(c *gin.Context) {
@@ -149,6 +169,7 @@ func main() {
 	<-quit
 	log.Println("shutting down...")
 	close(stop)
+	smtpCancel() // stop the SMTP server
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := srv.Shutdown(ctx); err != nil {

@@ -47,6 +47,14 @@ type GraphConfig struct {
 	PollIntervalSec int
 }
 
+// SMTPConfig holds settings for the built-in SMTP server that directly receives
+// mail for the configured domain, removing the need for a relay inbox.
+type SMTPConfig struct {
+	Enabled  bool   // true = start built-in SMTP server
+	Addr     string // listen address, e.g. ":25"
+	Hostname string // server hostname used in EHLO/HELO greeting
+}
+
 // Config holds all runtime configuration loaded from the environment.
 type Config struct {
 	// Domain used to build temporary email addresses, e.g. "mail.example.com".
@@ -60,6 +68,8 @@ type Config struct {
 	// Shared secret used to verify optional webhook calls. Leave empty to
 	// disable the webhook endpoint entirely (the IMAP poller is the default).
 	WebhookSecret string
+	// Built-in SMTP server for direct mail reception.
+	SMTP SMTPConfig
 	// IMAP settings for the Worker-free ingestion path.
 	IMAP IMAPConfig
 	// Graph settings: when Enabled, the Graph poller replaces the IMAP poller.
@@ -123,6 +133,11 @@ func Load() (*Config, error) {
 		WebhookSecret:      get("WEBHOOK_SECRET", ""),
 		DefaultTTLHours:    24,
 		CleanupIntervalMin: 30,
+		SMTP: SMTPConfig{
+			Enabled:  getBool("SMTP_ENABLED", false),
+			Addr:     get("SMTP_ADDR", ":25"),
+			Hostname: get("SMTP_HOSTNAME", ""),
+		},
 		IMAP: IMAPConfig{
 			Host:               get("IMAP_HOST", ""),
 			Port:               993,
@@ -208,6 +223,18 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("MAIL_DOMAIN must be set to your real domain")
 	}
 
+	// SMTP mode: the built-in SMTP server receives mail directly. IMAP/Graph
+	// are optional (for legacy relay setups or dual-mode operation).
+	if cfg.SMTP.Enabled {
+		if cfg.SMTP.Hostname == "" {
+			cfg.SMTP.Hostname = cfg.Domain
+		}
+		// SMTP-only: skip IMAP/Graph validation entirely.
+		if !cfg.Graph.Enabled && cfg.IMAP.Host == "" {
+			return cfg, nil
+		}
+	}
+
 	// Graph mode: validate Graph credentials and skip the IMAP requirement.
 	if cfg.Graph.Enabled {
 		if cfg.Graph.ClientID == "" || cfg.Graph.RefreshToken == "" {
@@ -219,13 +246,12 @@ func Load() (*Config, error) {
 		return cfg, nil
 	}
 
-	// IMAP is required for the Worker-free path. If neither IMAP nor a webhook
-	// secret is configured there is no way to receive mail.
+	// IMAP is required only when neither SMTP nor Graph nor webhook is configured.
 	if cfg.IMAP.Host == "" {
-		if cfg.WebhookSecret == "" {
-			return nil, fmt.Errorf("IMAP_HOST is required (or set IMAP_PROVIDER=firstmail / WEBHOOK_SECRET)")
+		if cfg.WebhookSecret == "" && !cfg.SMTP.Enabled {
+			return nil, fmt.Errorf("IMAP_HOST is required (or set IMAP_PROVIDER=firstmail / SMTP_ENABLED=true / WEBHOOK_SECRET)")
 		}
-		// Webhook-only mode: allowed but warned in main.go.
+		// SMTP-only or webhook-only mode: allowed.
 	} else {
 		if cfg.IMAP.AuthMode == "oauth2" {
 			if cfg.IMAP.ClientID == "" || cfg.IMAP.RefreshToken == "" {

@@ -2,20 +2,21 @@
 
 自建**临时域名邮箱**后端（Go + Gin + SQLite）。
 
-配合 **Cloudflare Email Routing** 的 catch-all 转发，把 `*@你的域名` 收到的邮件落到中转邮箱，再由本服务在**客户端查询时按需拉取**，通过 REST API 创建/查询/删除临时邮箱与邮件。
+内置 SMTP 服务器，**直接接收** `*@你的域名` 的邮件，无需依赖外部中转邮箱或 Cloudflare Email Routing。
 
 - 无前端、无外部数据库（内嵌 SQLite，纯 Go 驱动，**无需 CGO**）
-- 不消耗 Cloudflare Worker 次数（用「转发到邮箱」，不是 Send to Worker）
-- 收信：**IMAP**（Gmail / Firstmail 等）或 **Microsoft Graph**（个人 Outlook 推荐）
+- 内置 SMTP 服务器，直接收信
+- 可选：IMAP / Microsoft Graph 拉取中转邮箱（兼容旧架构）
+- 可选：Webhook 推送
 
 ---
 
 ## 目录
 
 1. [工作原理](#工作原理)
-2. [快速开始（5 步）](#快速开始5-步)
+2. [快速开始（3 步）](#快速开始3-步)
 3. [部署方式](#部署方式)
-4. [收信配置](#收信配置)
+4. [DNS 配置](#dns-配置)
 5. [API 速查](#api-速查)
 6. [配置项一览](#配置项一览)
 7. [运维建议](#运维建议)
@@ -29,17 +30,10 @@
 ## 工作原理
 
 ```text
-发件人 ──SMTP──> Cloudflare MX
-                      │
-                      ▼
-            Email Routing (catch-all *@yourdomain)
-                      │  转发到中转邮箱（免费，不触发 Worker）
-                      ▼
-         中转邮箱（Firstmail / Gmail / Outlook …）
-                      ▲
-                      │  客户端 GET 邮件接口时按需 IMAP / Graph 拉取
-                      │
-              ┌───────┴────────┐
+发件人 ──SMTP──> 本服务内置 SMTP 服务器（端口 25）
+                       │
+                       ▼  直接解析、存储
+              ┌────────────────┐
               │  tempmail 后端  │
               │  SQLite + REST  │
               └────────────────┘
@@ -49,34 +43,17 @@
 
 | 组件 | 作用 |
 |------|------|
-| Cloudflare Email Routing | catch-all 转发到**一个真实中转邮箱** |
-| 中转邮箱 | 实际收信；本服务只读它 |
-| tempmail | 按需拉信 → 按收件地址路由到临时邮箱 → API 查询 |
+| 内置 SMTP 服务器 | 直接接收 `*@MAIL_DOMAIN` 的邮件 |
+| tempmail REST API | 创建邮箱、查询/删除邮件 |
+| SQLite | 本地存储，无需外部数据库 |
 
-**默认不是后台常驻轮询。** 只有客户端请求邮件相关接口时才会去中转箱拉一次（见 [按需拉取](#按需拉取on-demand)）。
+**不再需要 Cloudflare Email Routing 或外部中转邮箱。**
 
 ---
 
-## 快速开始（5 步）
+## 快速开始（3 步）
 
-### 1. 准备域名与中转邮箱
-
-1. 域名 NS 指向 **Cloudflare**
-2. 准备一个中转邮箱（任选）：
-   - **Firstmail**：IMAP SSL `imap.firstmail.ltd:993` + 账号密码（最简单）
-   - **Gmail**：IMAP + [应用专用密码](https://myaccount.google.com/apppasswords)
-   - **个人 Outlook**：推荐 **Graph**（IMAP XOAUTH2 常不稳定）
-
-### 2. 配置 Cloudflare Email Routing
-
-1. 域名 → **Email → Email Routing**，按提示加 MX/TXT
-2. **Routes → Catch-all**：
-   - Action：**Send to an email**
-   - 填你的中转邮箱
-3. ⚠️ **不要**选 “Send to a Worker”
-4. 在中转邮箱里点开 Cloudflare 验证邮件
-
-### 3. 写配置
+### 1. 配置
 
 ```bash
 cp .env.example .env
@@ -87,16 +64,22 @@ cp .env.example .env
 ```env
 MAIL_DOMAIN=mail.example.com
 API_KEY=用 openssl rand -hex 32 生成
-
-# 例：Firstmail 中转
-IMAP_PROVIDER=firstmail
-IMAP_USER=relay@your-firstmail-domain.com
-IMAP_PASS=your-password
+SMTP_ENABLED=true
 ```
 
-> Graph 模式见 [收信配置](#收信配置)。`GRAPH_ENABLED=true` 时会忽略 IMAP。
+### 2. 配置 DNS
 
-### 4. 启动
+在你的域名 DNS 中添加：
+
+| 类型 | 名称 | 值 | 优先级 |
+|------|------|----|--------|
+| MX | `@` | `mail.example.com` | 10 |
+| A | `mail` | `你的服务器IP` | - |
+| TXT | `@` | `v=spf1 mx a ~all` | - |
+
+确保服务器开放 **25 端口**。
+
+### 3. 启动
 
 ```bash
 go run .          # 开发
@@ -104,10 +87,11 @@ go run .          # 开发
 go build -o tempmail . && ./tempmail
 ```
 
-期望日志（IMAP 示例）：
+期望日志：
 
 ```text
-imap on-demand fetch ready: relay@...@imap.firstmail.ltd:993 tls=true (triggered by GET messages)
+starting tempmail dev for domain "mail.example.com" on :8080
+smtp server enabled on :25 (hostname=mail.example.com, accepts mail for @mail.example.com)
 ```
 
 健康检查：
@@ -117,7 +101,7 @@ curl http://127.0.0.1:8080/healthz
 # {"ok":true,"version":"dev"}
 ```
 
-### 5. 调 API
+### 调 API
 
 ```bash
 export API_KEY='你的密钥'
@@ -128,12 +112,10 @@ curl -s -X POST "$BASE/api/mailboxes" \
   -H "X-API-Key: $API_KEY" -H "Content-Type: application/json" \
   -d '{"ttl_hours":12}'
 
-# 查邮件（会先按需拉中转箱，再返回）
+# 查邮件
 curl -s -H "X-API-Key: $API_KEY" \
   "$BASE/api/mailboxes/<address>/messages"
 ```
-
-生产环境请用 **HTTPS 反代**（Caddy / nginx）对外暴露。
 
 ---
 
@@ -162,7 +144,7 @@ chmod +x tempmail
 ### B. Docker / GHCR
 
 ```bash
-# 拉取（首次可能需把 GHCR 包设为 Public）
+# 拉取
 docker pull ghcr.io/xiaozhou26/tempmail:latest
 
 # 或本地构建
@@ -171,6 +153,7 @@ docker build -t tempmail:local --build-arg VERSION=dev .
 docker run -d --name tempmail \
   --restart unless-stopped \
   -p 8080:8080 \
+  -p 25:25 \
   -v tempmail-data:/data \
   --env-file .env \
   ghcr.io/xiaozhou26/tempmail:latest
@@ -178,17 +161,17 @@ docker run -d --name tempmail \
 
 | 项 | 说明 |
 |----|------|
-| 监听 | 容器内默认 `:8080`（`LISTEN_ADDR`） |
-| 数据库 | 默认 `/data/tempmail.db`（请挂 volume） |
+| HTTP API | `:8080`（`LISTEN_ADDR`） |
+| SMTP 收信 | `:25`（`SMTP_ADDR`） |
+| 数据库 | `/data/tempmail.db`（请挂 volume） |
 | 健康检查 | `GET /healthz` |
-| Graph token 写回 | 容器内默认写不进 `.env`；可把 token 当环境变量注入，或挂载可写 `/app/.env` |
 
 ### C. systemd
 
 ```ini
 # /etc/systemd/system/tempmail.service
 [Unit]
-Description=tempmail temporary mailbox API
+Description=tempmail temporary mailbox API + SMTP
 After=network.target
 
 [Service]
@@ -197,17 +180,13 @@ EnvironmentFile=/opt/tempmail/.env
 ExecStart=/opt/tempmail/tempmail
 Restart=always
 RestartSec=3
-User=tempmail
+User=root
 
 [Install]
 WantedBy=multi-user.target
 ```
 
-```bash
-systemctl daemon-reload
-systemctl enable --now tempmail
-journalctl -u tempmail -f
-```
+> ⚠️ SMTP 端口 25 需要 root 权限（或通过 `setcap` / `sysctl` 配置）。
 
 ### D. 发版（维护者）
 
@@ -220,63 +199,63 @@ git push origin v1.0.1
 
 ---
 
+## DNS 配置
+
+要让 `@yourdomain` 的邮件到达本服务，需要：
+
+1. **MX 记录**：指向运行本服务的服务器主机名
+2. **A 记录**：该主机名解析到服务器 IP
+3. **开放 25 端口**：确保防火墙和云服务商安全组放行
+
+可选但推荐：
+
+```dns
+; SPF — 声明本服务器可以发送邮件
+yourdomain.  TXT  "v=spf1 mx a ~all"
+
+; DKIM — 防止邮件被标记为垃圾（需要额外配置 DKIM 签名）
+; DMARC — 邮件认证策略
+_dmarc.yourdomain.  TXT  "v=DMARC1; p=none; rua=mailto:dmarc@yourdomain"
+```
+
+> 💡 不再需要 Cloudflare Email Routing。如果域名当前在 Cloudflare，可以直接添加 MX 记录指向本服务器。
+
+---
+
 ## 收信配置
-
-### 按需拉取（on-demand）
-
-| 触发接口 | 行为 |
-|----------|------|
-| `GET /api/mailboxes/:address/messages` | 先拉中转箱 → 返回该邮箱邮件 |
-| `GET /api/mailboxes/:address` | 同上（响应含 `messages`） |
-| `GET /api/messages/:id` | 先拉中转箱 → 返回详情 |
-
-- 并发请求合并为一次拉取
-- 约 1 秒内重复请求直接读库，避免打爆中转箱
-- Cloudflare 转发延迟仍是主要下限（数秒～数十秒）
-- 可选 Webhook 推送不受此限制
-
-客户端等验证码时，建议 **1～3 秒** 轮询 messages 接口。
 
 ### 模式选择
 
-| 中转邮箱 | 推荐模式 | 说明 |
-|----------|----------|------|
-| Firstmail | IMAP plain | `IMAP_PROVIDER=firstmail` |
-| Gmail | IMAP plain | 应用专用密码 |
-| 个人 Outlook | **Graph** | 避免 IMAP “authenticated but not connected” |
-| 企业 Outlook | Graph 或 IMAP OAuth2 | 视租户策略 |
+| 模式 | 说明 | 适用场景 |
+|------|------|----------|
+| **SMTP（推荐）** | 内置 SMTP 服务器直接收信 | 自建服务器，完全自主 |
+| IMAP | 从外部中转邮箱拉取 | 共享主机、无法开 25 端口 |
+| Graph | 从 Outlook 中转邮箱拉取 | 个人 Outlook 账号 |
+| Webhook | 外部推送 | Cloudflare Worker 等 |
 
-`GRAPH_ENABLED=true` 时**忽略**全部 IMAP 配置。
+各模式可以并存。SMTP 和 IMAP/Graph 可以同时启用。
 
-### Firstmail（IMAP）
+### SMTP 模式（默认推荐）
+
+```env
+SMTP_ENABLED=true
+SMTP_ADDR=:25
+# SMTP_HOSTNAME=mail.example.com  # 默认等于 MAIL_DOMAIN
+```
+
+DNS 配置 MX 记录指向本服务器即可。
+
+### IMAP 模式（兼容旧架构）
 
 ```env
 IMAP_PROVIDER=firstmail
-IMAP_USER=your-account@your-firstmail-domain.com
+IMAP_USER=relay@your-firstmail-domain.com
 IMAP_PASS=your-password
-# 等价于：
-# IMAP_HOST=imap.firstmail.ltd
-# IMAP_PORT=993
-# IMAP_TLS=true
-# IMAP_AUTH_MODE=plain
-# IMAP_MAILBOX=INBOX
 ```
 
-Cloudflare catch-all 请转发到**同一个** Firstmail 地址。
+需要配合 Cloudflare Email Routing 的 catch-all 转发。
 
-### Gmail（IMAP）
-
-```env
-IMAP_HOST=imap.gmail.com
-IMAP_PORT=993
-IMAP_TLS=true
-IMAP_AUTH_MODE=plain
-IMAP_USER=your-relay@gmail.com
-IMAP_PASS=your-app-password
-IMAP_MAILBOX=INBOX
-```
-
-### Microsoft Graph（个人 Outlook）
+### Microsoft Graph
 
 ```env
 GRAPH_ENABLED=true
@@ -285,33 +264,13 @@ GRAPH_CLIENT_SECRET=your-azure-app-secret
 GRAPH_TENANT_ID=common
 GRAPH_ACCOUNT=your-relay@outlook.com
 GRAPH_REFRESH_TOKEN=your-refresh-token
-GRAPH_TOKEN_SCOPE=offline_access Mail.Read Mail.ReadWrite User.Read
 ```
 
-1. Azure 应用授予委托权限：`Mail.Read`、`Mail.ReadWrite`、`offline_access`、`User.Read`，并管理员同意  
-2. 用仓库脚本拿 token：`python tools/get_graph_token.py`  
-3. ⚠️ **refresh_token 会轮换**，进程会写回 `.env`；**不要多实例并发**，否则互相顶掉 token  
-
-### IMAP + Outlook OAuth2（可选）
+### Webhook
 
 ```env
-IMAP_HOST=outlook.office365.com
-IMAP_PORT=993
-IMAP_TLS=true
-IMAP_AUTH_MODE=oauth2
-IMAP_USER=your@outlook.com
-IMAP_CLIENT_ID=...
-IMAP_TENANT_ID=consumers
-IMAP_REFRESH_TOKEN=...
-IMAP_TOKEN_SCOPE=https://outlook.office.com/IMAP.AccessAsUser.All offline_access
+WEBHOOK_SECRET=your-secret
 ```
-
-个人账号若报 `User is authenticated but not connected`，请改用 Graph。
-
-### Webhook（可选）
-
-配置 `WEBHOOK_SECRET` 后启用 `POST /api/webhook/email`（需 `X-Webhook-Secret`）。  
-适合 Email Worker 推送（会耗 Worker）；与 IMAP/Graph 可并存。
 
 ---
 
@@ -329,9 +288,9 @@ X-API-Key: <API_KEY>
 | GET | `/healthz` | 无 | 健康检查 + `version` |
 | POST | `/api/mailboxes` | Key | 创建临时邮箱 |
 | GET | `/api/mailboxes` | Key | 列出邮箱 |
-| GET | `/api/mailboxes/:address` | Key | 详情 + 邮件（会按需拉信） |
+| GET | `/api/mailboxes/:address` | Key | 详情 + 邮件 |
 | DELETE | `/api/mailboxes/:address` | Key | 删邮箱及邮件 |
-| GET | `/api/mailboxes/:address/messages` | Key | 邮件列表（会按需拉信） |
+| GET | `/api/mailboxes/:address/messages` | Key | 邮件列表 |
 | GET | `/api/messages/:id` | Key | 邮件详情（可含 `raw`） |
 | DELETE | `/api/messages/:id` | Key | 删单封 |
 | POST | `/api/webhook/email` | Webhook | 可选推送 |
@@ -361,10 +320,16 @@ curl -s -H "X-API-Key: $API_KEY" \
 
 | 变量 | 说明 |
 |------|------|
-| `MAIL_DOMAIN` | 临时邮箱域名（与 Cloudflare 一致） |
+| `MAIL_DOMAIN` | 临时邮箱域名（MX 记录应指向本服务器） |
 | `API_KEY` | 管理 API 密钥 |
 
-以及：**完整 IMAP 配置**（或 `IMAP_PROVIDER` + 账号密码），或 **Graph 全套**，或仅 `WEBHOOK_SECRET`（webhook-only）。
+### SMTP（推荐）
+
+| 变量 | 默认 | 说明 |
+|------|------|------|
+| `SMTP_ENABLED` | `false` | `true` 启用内置 SMTP 服务器 |
+| `SMTP_ADDR` | `:25` | SMTP 监听地址 |
+| `SMTP_HOSTNAME` | 等于 `MAIL_DOMAIN` | SMTP EHLO 主机名 |
 
 ### 常用可选
 
@@ -376,45 +341,39 @@ curl -s -H "X-API-Key: $API_KEY" \
 | `CLEANUP_INTERVAL_MIN` | `30` | 过期清理周期（分钟） |
 | `WEBHOOK_SECRET` | 空 | 非空则启用 webhook |
 
-### IMAP
+### IMAP（兼容旧架构）
 
 | 变量 | 默认 | 说明 |
 |------|------|------|
-| `IMAP_PROVIDER` | 空 | `firstmail` / `gmail` / `outlook` 预设 Host/Port/TLS |
-| `IMAP_HOST` | 空 | 主机（或由 PROVIDER 填充） |
+| `IMAP_PROVIDER` | 空 | `firstmail` / `gmail` / `outlook` 预设 |
+| `IMAP_HOST` | 空 | 主机 |
 | `IMAP_PORT` | `993` | 端口 |
-| `IMAP_USER` | 空 | 登录名（Firstmail 填完整邮箱） |
-| `IMAP_PASS` | 空 | 密码 / 应用专用密码 |
+| `IMAP_USER` | 空 | 登录名 |
+| `IMAP_PASS` | 空 | 密码 |
 | `IMAP_MAILBOX` | `INBOX` | 文件夹 |
-| `IMAP_TLS` | `true` | 隐式 TLS（993） |
-| `IMAP_STARTTLS` | `false` | 明文 + STARTTLS（143） |
-| `IMAP_TLS_INSECURE` | `false` | 跳过证书校验（仅调试） |
-| `IMAP_AUTH_MODE` | `plain` | `plain` 或 `oauth2` |
-| `IMAP_CLIENT_ID` 等 |  | OAuth2 时需要 |
+| `IMAP_TLS` | `true` | 隐式 TLS |
 
-### Graph
+### Graph（兼容旧架构）
 
 | 变量 | 默认 | 说明 |
 |------|------|------|
-| `GRAPH_ENABLED` | `false` | `true` 启用并忽略 IMAP |
+| `GRAPH_ENABLED` | `false` | `true` 启用 |
 | `GRAPH_CLIENT_ID` |  | Azure 应用 |
-| `GRAPH_CLIENT_SECRET` |  | Web 应用密钥 |
+| `GRAPH_CLIENT_SECRET` |  | 密钥 |
 | `GRAPH_TENANT_ID` | `common` | 租户 |
 | `GRAPH_ACCOUNT` |  | 中转邮箱地址 |
 | `GRAPH_REFRESH_TOKEN` |  | 会轮换写回 `.env` |
-| `GRAPH_TOKEN_SCOPE` | 见 example | 委托权限 scope |
-| `GRAPH_MAIL_FOLDER` | 空 | 空 = 默认收件箱 |
 
 ---
 
 ## 运维建议
 
 1. **API 走 HTTPS**；`API_KEY` 用 `openssl rand -hex 32`
-2. **中转邮箱专用**，避免别的客户端同时抢未读（IMAP 以 `\Seen` 为进度）
+2. **25 端口**可能被云服务商封禁（阿里云、腾讯云等），需申请解封
 3. **不要提交** `.env`、`*_tokens.txt`、refresh_token / client_secret
-4. Graph **单实例**，避免 token 互顶
-5. 数据在 SQLite 文件；备份即复制 `DB_PATH`
-6. 需要 MySQL/PostgreSQL 时，改 `storage/db.go` 驱动即可，模型与 handler 可不动
+4. 数据在 SQLite 文件；备份即复制 `DB_PATH`
+5. 建议配置 SPF/DKIM/DMARC 提高送达率
+6. 生产环境建议用 **Caddy/nginx** 反代 HTTPS
 
 ---
 
@@ -422,16 +381,17 @@ curl -s -H "X-API-Key: $API_KEY" \
 
 ```text
 .
-├── main.go                 # 入口：路由、清理、按需收信装配
-├── config/                 # 环境变量与 token 写回
+├── main.go                 # 入口：路由、SMTP 服务器启动、清理
+├── config/                 # 环境变量配置
 ├── models/                 # Mailbox / Message
 ├── storage/                # SQLite 打开与迁移
 ├── middleware/             # API Key / Webhook 鉴权
 ├── handlers/               # HTTP + 入库逻辑
-├── ingest/                 # 按需拉取协调（OnDemand）
-├── graph/                  # Microsoft Graph FetchOnce
-├── imap/                   # IMAP FetchOnce（Firstmail/Gmail/…）
-├── tools/                  # Graph token 脚本
+├── smtp/                   # 内置 SMTP 服务器
+├── ingest/                 # 按需拉取协调（可选，用于 IMAP/Graph 模式）
+├── graph/                  # Microsoft Graph FetchOnce（可选）
+├── imap/                   # IMAP FetchOnce（可选）
+├── tools/                  # 辅助脚本
 ├── Dockerfile
 ├── build.sh
 ├── .github/workflows/release.yml
