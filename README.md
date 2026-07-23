@@ -212,11 +212,15 @@ git push origin v1.0.1
 ```dns
 ; SPF — 声明本服务器可以发送邮件
 yourdomain.  TXT  "v=spf1 mx a ~all"
+; 如果服务器 IP 固定，建议用 ip4: 精确声明：
+; yourdomain.  TXT  "v=spf1 ip4:你的服务器IP ~all"
 
-; DKIM — 防止邮件被标记为垃圾（需要额外配置 DKIM 签名）
-; DMARC — 邮件认证策略
-_dmarc.yourdomain.  TXT  "v=DMARC1; p=none; rua=mailto:dmarc@yourdomain"
+; DMARC — 邮件认证策略（防止发件人域名被伪造）
+_dmarc.yourdomain.  TXT  "v=DMARC1; p=none; rua=mailto:dmarc-report@yourdomain"
 ```
+
+> **发信必须配 SPF 记录**，否则 Gmail/Outlook 等会因 DMARC 验证失败拒收或进垃圾箱。  
+> 如果你的域名已有 DMARC `p=reject` 策略，不配 SPF 的直连发信将 100% 被拒收。
 
 > 💡 不再需要 Cloudflare Email Routing。如果域名当前在 Cloudflare，可以直接添加 MX 记录指向本服务器。
 
