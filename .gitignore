@@ -8,7 +8,7 @@
 .claude/
 # Local config (contains secrets)
 .env
-
+.superpowers/
 # OAuth tokens and credential files (NEVER commit)
 microsoft_tokens.txt
 my_graph_tokens.txt
