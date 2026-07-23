@@ -55,6 +55,18 @@ type SMTPConfig struct {
 	Hostname string // server hostname used in EHLO/HELO greeting
 }
 
+// SMTPSendConfig holds settings for outbound mail delivery.
+// When Host is non-empty, mail is sent via that SMTP relay; otherwise
+// the sender falls back to direct MX delivery.
+type SMTPSendConfig struct {
+	Host     string
+	Port     int
+	User     string
+	Pass     string
+	StartTLS bool
+	From     string // optional default From when request omits it
+}
+
 // Config holds all runtime configuration loaded from the environment.
 type Config struct {
 	// Primary domain (first in the list).
@@ -72,6 +84,8 @@ type Config struct {
 	WebhookSecret string
 	// Built-in SMTP server for direct mail reception.
 	SMTP SMTPConfig
+	// Outbound SMTP (optional relay). Empty Host => direct MX delivery.
+	SMTPSend SMTPSendConfig
 	// IMAP settings for the Worker-free ingestion path.
 	IMAP IMAPConfig
 	// Graph settings: when Enabled, the Graph poller replaces the IMAP poller.
@@ -80,6 +94,8 @@ type Config struct {
 	DefaultTTLHours int
 	// How often expired mailboxes get purged (in minutes).
 	CleanupIntervalMin int
+	// Max age of stored inbound messages in hours; 0 disables age cleanup.
+	MessageTTLHours int
 }
 
 // knownIMAPProviders fills host/port/tls defaults for common providers when
@@ -146,10 +162,19 @@ func Load() (*Config, error) {
 		WebhookSecret:      get("WEBHOOK_SECRET", ""),
 		DefaultTTLHours:    24,
 		CleanupIntervalMin: 30,
+		MessageTTLHours:    24,
 		SMTP: SMTPConfig{
 			Enabled:  getBool("SMTP_ENABLED", false),
 			Addr:     get("SMTP_ADDR", ":25"),
 			Hostname: get("SMTP_HOSTNAME", ""),
+		},
+		SMTPSend: SMTPSendConfig{
+			Host:     get("SMTP_SEND_HOST", ""),
+			Port:     587,
+			User:     get("SMTP_SEND_USER", ""),
+			Pass:     get("SMTP_SEND_PASS", ""),
+			StartTLS: getBool("SMTP_SEND_STARTTLS", true),
+			From:     get("SMTP_SEND_FROM", ""),
 		},
 		IMAP: IMAPConfig{
 			Host:               get("IMAP_HOST", ""),
@@ -225,6 +250,16 @@ func Load() (*Config, error) {
 	}
 	if n, err := getInt("GRAPH_POLL_INTERVAL_SEC", cfg.Graph.PollIntervalSec); err == nil {
 		cfg.Graph.PollIntervalSec = n
+	} else {
+		return nil, err
+	}
+	if n, err := getInt("SMTP_SEND_PORT", cfg.SMTPSend.Port); err == nil {
+		cfg.SMTPSend.Port = n
+	} else {
+		return nil, err
+	}
+	if n, err := getInt("MESSAGE_TTL_HOURS", cfg.MessageTTLHours); err == nil {
+		cfg.MessageTTLHours = n
 	} else {
 		return nil, err
 	}
