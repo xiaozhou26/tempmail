@@ -294,6 +294,7 @@ X-API-Key: <API_KEY>
 | GET | `/api/messages/:id` | Key | 邮件详情（可含 `raw`） |
 | DELETE | `/api/messages/:id` | Key | 删单封 |
 | POST | `/api/webhook/email` | Webhook | 可选推送 |
+| POST | `/api/send` | Key | 向外发邮件（from 限本域名，中继优先/直连回退） |
 
 **等验证码最小流程：**
 
@@ -339,6 +340,13 @@ curl -s -H "X-API-Key: $API_KEY" \
 | `DB_PATH` | `./data/tempmail.db` | SQLite 路径（Docker 用 `/data/tempmail.db`） |
 | `DEFAULT_TTL_HOURS` | `24` | 新建邮箱默认存活 |
 | `CLEANUP_INTERVAL_MIN` | `30` | 过期清理周期（分钟） |
+| `MESSAGE_TTL_HOURS` | `24` | 入站消息保留时长（小时），`0` = 关闭 |
+| `SMTP_SEND_HOST` | 空 | 外发 SMTP 中继地址，空 = 直连 MX |
+| `SMTP_SEND_PORT` | `587` | 外发端口 |
+| `SMTP_SEND_USER` | 空 | 中继认证用户 |
+| `SMTP_SEND_PASS` | 空 | 中继认证密码 |
+| `SMTP_SEND_STARTTLS` | `true` | 587 用 STARTTLS，`false` 且端口 465 时隐式 TLS |
+| `SMTP_SEND_FROM` | 空 | 可选默认发件人 |
 | `WEBHOOK_SECRET` | 空 | 非空则启用 webhook |
 
 ### IMAP（兼容旧架构）
