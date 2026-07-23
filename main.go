@@ -16,6 +16,7 @@ import (
 	imappoll "tempmail/imap"
 	"tempmail/ingest"
 	"tempmail/middleware"
+	"tempmail/sender"
 	smtpServer "tempmail/smtp"
 	"tempmail/storage"
 )
@@ -39,13 +40,34 @@ func main() {
 	msgH := &handlers.MessageHandler{DB: db}
 	webhookH := &handlers.WebhookHandler{DB: db, Domains: cfg.Domains}
 
+	sendH := &handlers.SendHandler{
+		Sender: sender.NewSender(
+			cfg.SMTPSend.Host,
+			cfg.SMTPSend.Port,
+			cfg.SMTPSend.User,
+			cfg.SMTPSend.Pass,
+			cfg.SMTPSend.StartTLS,
+		),
+		Domains:     cfg.Domains,
+		DefaultFrom: cfg.SMTPSend.From,
+	}
+
 	// On-demand ingestion: only fetch from Graph/IMAP when a client asks for mail.
 	var onDemand *ingest.OnDemand
 
 	// Background cleanup only. Mail is fetched on demand when clients hit
 	// message-related endpoints (see ingest.OnDemand).
 	stop := make(chan struct{})
-	go runCleanup(emailH, cfg.CleanupIntervalMin, stop)
+	go runCleanup(emailH, cfg.CleanupIntervalMin, cfg.MessageTTLHours, stop)
+
+	if cfg.SMTPSend.Host != "" {
+		log.Printf("outbound mail: relay %s:%d starttls=%v", cfg.SMTPSend.Host, cfg.SMTPSend.Port, cfg.SMTPSend.StartTLS)
+	} else {
+		log.Printf("outbound mail: direct MX delivery")
+	}
+	if cfg.MessageTTLHours > 0 {
+		log.Printf("message TTL: %dh", cfg.MessageTTLHours)
+	}
 
 	// Graph takes priority over IMAP when enabled (matches README / config.Load).
 	if cfg.Graph.Enabled {
@@ -148,6 +170,7 @@ func main() {
 		mgmt.GET("/mailboxes/:address/messages", msgH.ListMessages)
 		mgmt.GET("/messages/:id", msgH.GetMessage)
 		mgmt.DELETE("/messages/:id", msgH.DeleteMessage)
+		mgmt.POST("/send", sendH.Send)
 	}
 	// Optional webhook ingress (disabled unless WEBHOOK_SECRET is set).
 	api.POST("/webhook/email", middleware.WebhookAuth(cfg.WebhookSecret), webhookH.Receive)
@@ -180,7 +203,7 @@ func main() {
 	}
 }
 
-func runCleanup(h *handlers.EmailHandler, everyMin int, stop <-chan struct{}) {
+func runCleanup(h *handlers.EmailHandler, everyMin, msgTTLHours int, stop <-chan struct{}) {
 	if everyMin <= 0 {
 		everyMin = 30
 	}
@@ -193,6 +216,13 @@ func runCleanup(h *handlers.EmailHandler, everyMin int, stop <-chan struct{}) {
 				log.Printf("cleanup error: %v", err)
 			} else if n > 0 {
 				log.Printf("cleanup: removed %d expired mailboxes", n)
+			}
+			if msgTTLHours > 0 {
+				if n, err := h.CleanupOldMessages(time.Duration(msgTTLHours) * time.Hour); err != nil {
+					log.Printf("cleanup messages error: %v", err)
+				} else if n > 0 {
+					log.Printf("cleanup: removed %d old messages", n)
+				}
 			}
 		case <-stop:
 			return
