@@ -154,7 +154,11 @@ func deliverToDomain(from, domain string, rcpts []string, msg []byte) error {
 	var last error
 	for _, host := range hosts {
 		addr := net.JoinHostPort(host, "25")
-		conn, err := net.DialTimeout("tcp", addr, 30*time.Second)
+		// Prefer IPv4 for better rDNS/PTR compatibility on most servers.
+		conn, err := net.DialTimeout("tcp4", addr, 30*time.Second)
+		if err != nil {
+			conn, err = net.DialTimeout("tcp6", addr, 30*time.Second)
+		}
 		if err != nil {
 			last = err
 			continue
