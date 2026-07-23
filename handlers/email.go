@@ -164,3 +164,16 @@ func (h *EmailHandler) CleanupExpired() (int64, error) {
 	}
 	return res.RowsAffected, nil
 }
+
+// CleanupOldMessages deletes messages whose received_at is older than maxAge.
+func (h *EmailHandler) CleanupOldMessages(maxAge time.Duration) (int64, error) {
+	if maxAge <= 0 {
+		return 0, nil
+	}
+	cutoff := time.Now().Add(-maxAge)
+	res := h.DB.Where("received_at < ?", cutoff).Delete(&models.Message{})
+	if res.Error != nil {
+		return 0, fmt.Errorf("cleanup messages: %w", res.Error)
+	}
+	return res.RowsAffected, nil
+}
