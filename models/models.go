@@ -19,7 +19,7 @@ type Mailbox struct {
 // the raw message to the webhook endpoint.
 type Message struct {
 	ID         uint      `gorm:"primaryKey" json:"id"`
-	MailboxID  uint      `gorm:"index;not null" json:"mailbox_id"`
+	MailboxID  uint      `gorm:"not null;index:idx_msg_mbox_received,priority:1" json:"mailbox_id"`
 	GraphID    string    `gorm:"index" json:"-"` // Microsoft Graph message id, for dedup when using the Graph poller
 	From       string    `gorm:"index" json:"from"`
 	To         string    `json:"to"`
@@ -27,5 +27,5 @@ type Message struct {
 	TextBody   string    `json:"text_body"`
 	HTMLBody   string    `json:"html_body"`
 	Raw        string    `gorm:"type:text" json:"-"` // full RFC822 source, omitted from JSON lists
-	ReceivedAt time.Time `gorm:"index" json:"received_at"`
+	ReceivedAt time.Time `gorm:"index;index:idx_msg_mbox_received,priority:2" json:"received_at"`
 }

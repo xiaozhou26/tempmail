@@ -112,8 +112,11 @@ func (h *EmailHandler) GetMailbox(c *gin.Context) {
 	}
 	address := strings.ToLower(c.Param("address"))
 	var mb models.Mailbox
+	// Omit the heavy Raw column from the embedded messages: GetMailbox returns
+	// list-shaped messages (Raw is json:"-"), and pulling full RFC822 for every
+	// message on each read hurts under concurrent polling.
 	err := h.DB.Preload("Messages", func(db *gorm.DB) *gorm.DB {
-		return db.Order("received_at DESC")
+		return db.Omit("Raw").Order("received_at DESC")
 	}).First(&mb, "address = ?", address).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "mailbox not found"})

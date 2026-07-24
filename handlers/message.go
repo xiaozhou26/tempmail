@@ -45,7 +45,9 @@ func (h *MessageHandler) ListMessages(c *gin.Context) {
 		return
 	}
 	var msgs []models.Message
-	h.DB.Where("mailbox_id = ?", mb.ID).Order("received_at DESC").Find(&msgs)
+	// Omit the potentially multi-MB Raw column: it is json:"-" and never appears
+	// in list output, so loading it would waste I/O and memory on every poll.
+	h.DB.Omit("Raw").Where("mailbox_id = ?", mb.ID).Order("received_at DESC").Find(&msgs)
 	c.JSON(http.StatusOK, msgs)
 }
 
