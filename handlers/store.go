@@ -69,7 +69,7 @@ func StoreMessage(db *gorm.DB, domains []string, raw string) (*models.Message, e
 
 // findRecipient inspects To / Delivered-To / X-Forwarded-To / X-Original-To
 // headers (in that order) and returns the first address whose domain matches
-// any of the configured domains.
+// any of the configured domains (exact or subdomain match).
 func findRecipient(env *enmime.Envelope, domains []string) string {
 	candidates := []string{
 		env.GetHeader("To"),
@@ -81,10 +81,19 @@ func findRecipient(env *enmime.Envelope, domains []string) string {
 	for i, d := range domains {
 		suffixes[i] = "@" + d
 	}
+	subSuffixes := make([]string, len(domains))
+	for i, d := range domains {
+		subSuffixes[i] = "." + d
+	}
 	for _, h := range candidates {
 		for _, addr := range extractAddresses(h) {
 			addr = strings.ToLower(strings.TrimSpace(addr))
 			for _, suffix := range suffixes {
+				if strings.HasSuffix(addr, suffix) {
+					return addr
+				}
+			}
+			for _, suffix := range subSuffixes {
 				if strings.HasSuffix(addr, suffix) {
 					return addr
 				}

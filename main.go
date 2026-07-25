@@ -36,7 +36,7 @@ func main() {
 		log.Fatalf("db: %v", err)
 	}
 
-	emailH := &handlers.EmailHandler{DB: db, Domain: cfg.Domain, Domains: cfg.Domains, TTLHours: cfg.DefaultTTLHours}
+	emailH := &handlers.EmailHandler{DB: db, Domain: cfg.Domain, Domains: cfg.Domains, TTLHours: cfg.DefaultTTLHours, AllowSubdomains: cfg.AllowSubdomains}
 	msgH := &handlers.MessageHandler{DB: db}
 	webhookH := &handlers.WebhookHandler{DB: db, Domains: cfg.Domains}
 
@@ -140,10 +140,11 @@ func main() {
 	smtpCtx, smtpCancel := context.WithCancel(context.Background())
 	if cfg.SMTP.Enabled {
 		smtpSrv = &smtpServer.Server{
-			Addr:     cfg.SMTP.Addr,
-			Hostname: cfg.SMTP.Hostname,
-			Domains:  cfg.Domains,
-			DB:       db,
+			Addr:            cfg.SMTP.Addr,
+			Hostname:        cfg.SMTP.Hostname,
+			Domains:         cfg.Domains,
+			DB:              db,
+			AllowSubdomains: cfg.AllowSubdomains,
 		}
 		go func() {
 			if err := smtpSrv.Start(smtpCtx); err != nil {

@@ -22,6 +22,8 @@ type Server struct {
 	Hostname string   // server hostname for EHLO/HELO
 	Domains  []string // email domains to accept mail for
 	DB       *gorm.DB
+	// AllowSubdomains accepts *@*.domain addresses (e.g. user@abc.muskqq.com).
+	AllowSubdomains bool
 
 	srv *goSmtp.Server
 }
@@ -34,8 +36,9 @@ func (s *Server) Start(ctx context.Context) error {
 		domains[i] = strings.ToLower(d)
 	}
 	be := &backend{
-		db:      s.DB,
-		domains: domains,
+		db:              s.DB,
+		domains:         domains,
+		allowSubdomains: s.AllowSubdomains,
 	}
 
 	s.srv = goSmtp.NewServer(be)
@@ -62,19 +65,21 @@ func (s *Server) Start(ctx context.Context) error {
 
 // backend implements go-smtp.Backend.
 type backend struct {
-	db      *gorm.DB
-	domains []string
+	db              *gorm.DB
+	domains         []string
+	allowSubdomains bool
 }
 
 func (b *backend) NewSession(_ *goSmtp.Conn) (goSmtp.Session, error) {
-	return &session{db: b.db, domains: b.domains}, nil
+	return &session{db: b.db, domains: b.domains, allowSubdomains: b.allowSubdomains}, nil
 }
 
 // session implements go-smtp.Session.
 type session struct {
-	db      *gorm.DB
-	domains []string
-	from    string
+	db              *gorm.DB
+	domains         []string
+	allowSubdomains bool
+	from            string
 }
 
 func (s *session) Mail(from string, _ *goSmtp.MailOptions) error {
@@ -83,10 +88,15 @@ func (s *session) Mail(from string, _ *goSmtp.MailOptions) error {
 }
 
 func (s *session) Rcpt(to string, _ *goSmtp.RcptOptions) error {
-	// Only accept recipients on our domains.
+	// Only accept recipients on our domains (exact or subdomain match).
 	addr := strings.ToLower(strings.TrimSpace(to))
 	for _, d := range s.domains {
 		if strings.HasSuffix(addr, "@"+d) {
+			return nil
+		}
+		if s.allowSubdomains && strings.HasSuffix(addr, "."+d) {
+			// Accept user@sub.domain — the local-part@sub.domain form
+			// where sub is a random/generated subdomain.
 			return nil
 		}
 	}

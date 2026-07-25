@@ -96,6 +96,10 @@ type Config struct {
 	CleanupIntervalMin int
 	// Max age of stored inbound messages in hours; 0 disables age cleanup.
 	MessageTTLHours int
+	// AllowSubdomains enables creating mailboxes under random subdomains,
+	// e.g. user@abc123.muskqq.com. When enabled, the SMTP server accepts
+	// *@*.domain and the CreateMailbox API supports a "subdomain" field.
+	AllowSubdomains bool
 }
 
 // knownIMAPProviders fills host/port/tls defaults for common providers when
@@ -163,6 +167,7 @@ func Load() (*Config, error) {
 		DefaultTTLHours:    24,
 		CleanupIntervalMin: 30,
 		MessageTTLHours:    24,
+		AllowSubdomains:    getBool("SUBDOMAIN_ENABLED", false),
 		SMTP: SMTPConfig{
 			Enabled:  getBool("SMTP_ENABLED", false),
 			Addr:     get("SMTP_ADDR", ":25"),

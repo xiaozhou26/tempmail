@@ -20,13 +20,17 @@ type EmailHandler struct {
 	Domains  []string // all configured domains
 	TTLHours int
 	Ingest   *ingest.OnDemand // optional; GetMailbox triggers a relay fetch first
+	// AllowSubdomains enables creating mailboxes under random subdomains,
+	// e.g. user@abc123.muskqq.com.
+	AllowSubdomains bool
 }
 
 // CreateMailboxRequest is the body for POST /api/mailboxes.
 type CreateMailboxRequest struct {
-	Name     string `json:"name"`      // optional custom local-part; random if empty
-	Domain   string `json:"domain"`    // optional; uses primary domain if empty
-	TTLHours int    `json:"ttl_hours"` // optional override; defaults to server config
+	Name      string `json:"name"`      // optional custom local-part; random if empty
+	Domain    string `json:"domain"`    // optional; uses primary domain if empty
+	Subdomain string `json:"subdomain"` // optional subdomain; random if "random", omitted if empty
+	TTLHours  int    `json:"ttl_hours"` // optional override; defaults to server config
 }
 
 // CreateMailbox registers a new temporary mailbox and returns its address.
@@ -65,7 +69,27 @@ func (h *EmailHandler) CreateMailbox(c *gin.Context) {
 			return
 		}
 	}
-	address := name + "@" + domain
+
+	// Build the full domain (with optional subdomain).
+	fullDomain := domain
+	if req.Subdomain != "" {
+		if !h.AllowSubdomains {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "subdomains are not enabled on this server"})
+			return
+		}
+		sub := strings.ToLower(strings.TrimSpace(req.Subdomain))
+		if sub == "random" {
+			sub = strings.ReplaceAll(uuid.NewString()[:8], "-", "")
+		} else {
+			sub = sanitizeSubdomain(sub)
+			if sub == "" {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "invalid subdomain"})
+				return
+			}
+		}
+		fullDomain = sub + "." + domain
+	}
+	address := name + "@" + fullDomain
 
 	// Avoid collisions on custom names.
 	if req.Name != "" {
@@ -157,6 +181,25 @@ func sanitizeLocalPart(s string) string {
 		}
 	}
 	return strings.Trim(b.String(), ".")
+}
+
+// sanitizeSubdomain keeps only a-z0-9- characters for a subdomain label,
+// trims hyphens, and enforces a max length of 63 (DNS label limit).
+func sanitizeSubdomain(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '-':
+			b.WriteRune(r)
+		case r >= 'A' && r <= 'Z':
+			b.WriteRune(r + 32)
+		}
+	}
+	result := strings.Trim(b.String(), "-")
+	if len(result) > 63 {
+		result = result[:63]
+	}
+	return result
 }
 
 // CleanupExpired deletes mailboxes past their expiry. Intended to run on a ticker.
