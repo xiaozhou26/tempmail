@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
@@ -12,8 +13,10 @@ import (
 )
 
 type MessageHandler struct {
-	DB     *gorm.DB
-	Ingest *ingest.OnDemand // optional; when set, list/get trigger a relay fetch first
+	DB              *gorm.DB
+	Domains         []string
+	AllowSubdomains bool
+	Ingest          *ingest.OnDemand // optional; when set, list/get trigger a relay fetch first
 }
 
 // messageDetail wraps a Message so the raw RFC822 source (which the model
@@ -30,6 +33,24 @@ func (h *MessageHandler) sync(c *gin.Context) {
 	}
 }
 
+func (h *MessageHandler) isConfiguredAddress(address string) bool {
+	at := strings.LastIndexByte(address, '@')
+	if at <= 0 || at == len(address)-1 {
+		return false
+	}
+	domain := address[at+1:]
+	for _, configured := range h.Domains {
+		configured = strings.ToLower(strings.TrimSpace(configured))
+		if domain == configured {
+			return true
+		}
+		if h.AllowSubdomains && strings.HasSuffix(domain, "."+configured) {
+			return true
+		}
+	}
+	return false
+}
+
 // ListMessages lists messages for a mailbox, newest first.
 // GET /api/mailboxes/:address/messages
 //
@@ -41,7 +62,28 @@ func (h *MessageHandler) ListMessages(c *gin.Context) {
 	address := strings.ToLower(c.Param("address"))
 	var mb models.Mailbox
 	if err := h.DB.First(&mb, "address = ?", address).Error; errors.Is(err, gorm.ErrRecordNotFound) {
-		c.JSON(http.StatusNotFound, gin.H{"error": "mailbox not found"})
+		if h.isConfiguredAddress(address) {
+			local := address
+			if i := strings.IndexByte(address, '@'); i >= 0 {
+				local = address[:i]
+			}
+			mb = models.Mailbox{
+				Address:   address,
+				Name:      local,
+				ExpiresAt: time.Now().AddDate(1, 0, 0),
+			}
+			if createErr := h.DB.Create(&mb).Error; createErr != nil {
+				if retryErr := h.DB.First(&mb, "address = ?", address).Error; retryErr != nil {
+					c.JSON(http.StatusInternalServerError, gin.H{"error": createErr.Error()})
+					return
+				}
+			}
+		} else {
+			c.JSON(http.StatusNotFound, gin.H{"error": "mailbox not found"})
+			return
+		}
+	} else if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 	var msgs []models.Message

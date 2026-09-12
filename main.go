@@ -37,7 +37,7 @@ func main() {
 	}
 
 	emailH := &handlers.EmailHandler{DB: db, Domain: cfg.Domain, Domains: cfg.Domains, TTLHours: cfg.DefaultTTLHours, AllowSubdomains: cfg.AllowSubdomains}
-	msgH := &handlers.MessageHandler{DB: db}
+	msgH := &handlers.MessageHandler{DB: db, Domains: cfg.Domains, AllowSubdomains: cfg.AllowSubdomains}
 	webhookH := &handlers.WebhookHandler{DB: db, Domains: cfg.Domains}
 
 	sendH := &handlers.SendHandler{
